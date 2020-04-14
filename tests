@@ -1,0 +1,41 @@
+
+    /*char **elements = (char**) calloc(ANALISIS_SPACE * ANALISIS_SPACE, sizeof(char*));
+    uint32_t el[10] = {0};
+
+    for (size_t i = 0; i < ANALISIS_SPACE; i++) {
+        el[0] = i;
+
+        for (size_t t = 0; t < ANALISIS_SPACE; t++) {
+            el[1] = t;
+            oes->load_data(reinterpret_cast<char *>(el), 8);
+            auto temp =  oes->hash(ANALISIS_ENCODE)->exportBlock(oes->cipherBlock,OES_EXPORT_HEX);
+            elements[i * ANALISIS_SPACE + t] = (char*) temp.first;
+            //cout << elements[i * ANALISIS_SPACE + t] << endl;
+        }
+    }
+
+    cout << endl << "Set: " << ANALISIS_SPACE * ANALISIS_SPACE << endl << "Occurrences: "
+         << countOccurrences((void **) elements, ANALISIS_SPACE * 2, 2 * OES_BYTES_X_BLOCK * ANALISIS_ENCODE) << endl;
+
+    return 0;
+*/
+/*
+    oes->load_data((char *) "abcde");
+
+    //oes->streamMode = true;
+
+    cout << endl << double(clock() - begin) / CLOCKS_PER_SEC << "s" << endl;
+
+    while (true) {
+        cin >> str;
+        begin = clock();
+
+        oes->load_data((char *) str.c_str());
+
+        oes->enc_adv();
+
+        cout << (char *) oes->dec_adv()->dump()->exportBlock(oes->plainBlock, OES_EXPORT_CHAR).first << endl << endl;
+
+        cout << endl << double(clock() - begin) / CLOCKS_PER_SEC << "s" << endl;
+    }
+*/

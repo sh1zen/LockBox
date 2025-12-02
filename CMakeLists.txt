@@ -23,7 +23,7 @@ set(COMMON_SOURCES
         OpenES/support/base64/base64.cpp
         OpenES/OES.cpp
         OpenES/layer/raw-layer.cpp
-        OpenES/interface/block-interface.cpp
+        OpenES/layer/interface.cpp
         OpenES/algo/block_ciphers.cpp
         OpenES/support/big_int/big_int.cpp
         OpenES/algo/asymmetric.cpp
@@ -31,14 +31,15 @@ set(COMMON_SOURCES
         OpenES/algo/hashing.cpp
         OpenES/support/support.cpp
         OpenES/support/oes-exception.cpp
-        OpenES/layer/converter.cpp
-        OpenES/algo/key_managment.cpp
+        OpenES/algo/key_management.cpp
         OpenES/support/oesMath.cpp
         OpenES/algo/homomorphic.cpp
         iNode/Block.cpp
         iNode/iNode.cpp
         iNode/inode_raw.cpp
-        OpenES/layer/oes_common.cpp
+        OpenES/layer/m_block.h
+        OpenES/layer/m_block.cpp
+        OpenES/algo/constants.h
 )
 
 set(APP_SOURCES

@@ -1,7 +1,7 @@
 #ifndef ASYMMETRIC_H
 #define ASYMMETRIC_H
 
-#include "oes_common.h"
+#include "m_block.h"
 
 /**
  * Generate public/private key pair for asymmetric encryption
@@ -9,63 +9,85 @@
  *
  * @param p First prime number
  * @param q Second prime number
- * @param publicKey Output array [n, e] where n is modulus, e is public exponent
- * @param privateKey Output array [n, d] where n is modulus, d is private exponent
+ * @param publicKey Output MBLOCK* [n, e] where n is modulus, e is public exponent
+ * @param privateKey Output MBLOCK* [n, d] where n is modulus, d is private exponent
  * @return true if successful, false otherwise
  *
  * Example:
- *   m_block publicKey[2];
- *   m_block privateKey[2];
- *   oes_generate_keypair(61, 53, publicKey, privateKey);
+ *   MBLOCK* publicKey;
+ *   MBLOCK* privateKey;
+ *   oes_generate_keypair(61, 53, &publicKey, &privateKey);
+ *   // Use keys...
+ *   delete publicKey;
+ *   delete privateKey;
  */
-bool oes_generate_keypair(m_block p, m_block q, m_block* publicKey, m_block* privateKey);
+bool oes_generate_keypair(m_block p, m_block q, MBLOCK** publicKey, MBLOCK** privateKey);
 
 /**
  * Asymmetric encryption/decryption
  * For each data block: result = (data^exponent) mod modulus
  *
- * @param data Input data array
- * @param dataLen Length of data array
- * @param key Key array [modulus, exponent]
- * @param keyLen Length of key array (must be >= 2)
+ * @param data Input MBLOCK
+ * @param key Key MBLOCK [modulus, exponent]
  * @param seed Optional seed for additional randomization
- * @return Encrypted/decrypted OES_BLOCK (caller must free with unset_block)
+ * @return Encrypted/decrypted MBLOCK* (caller must delete)
  *
  * Note: For encryption, use public key. For decryption, use private key.
  */
-OES_BLOCK oes_asymmetric(const m_block* data, size_t dataLen, const m_block* key, size_t keyLen, m_block seed);
+MBLOCK* oes_asymmetric(const MBLOCK* data, const MBLOCK* key, m_block seed);
 
 /**
  * Encrypt data using public key
  * Wrapper around oes_asymmetric for clarity
  *
- * @param plaintext Input plaintext block
- * @param publicKey Public key [modulus, public_exponent]
+ * @param plaintext Input plaintext MBLOCK
+ * @param publicKey Public key MBLOCK [modulus, public_exponent]
  * @param seed Optional seed value
- * @return Encrypted OES_BLOCK (caller must free with unset_block)
+ * @return Encrypted MBLOCK* (caller must delete)
+ *
+ * Example:
+ *   MBLOCK* plaintext = MBLOCK::fromBytes("Hello", 5);
+ *   MBLOCK* encrypted = oes_public_encrypt(plaintext, publicKey, 0);
+ *   // Use encrypted...
+ *   delete plaintext;
+ *   delete encrypted;
  */
-OES_BLOCK oes_public_encrypt(OES_BLOCK plaintext, const m_block* publicKey, m_block seed);
+MBLOCK* oes_public_encrypt(const MBLOCK* plaintext, const MBLOCK* publicKey, m_block seed);
 
 /**
  * Decrypt data using private key
  * Wrapper around oes_asymmetric for clarity
  *
- * @param ciphertext Input ciphertext block
- * @param privateKey Private key [modulus, private_exponent]
+ * @param ciphertext Input ciphertext MBLOCK
+ * @param privateKey Private key MBLOCK [modulus, private_exponent]
  * @param seed Optional seed value (must match encryption seed)
- * @return Decrypted OES_BLOCK (caller must free with unset_block)
+ * @return Decrypted MBLOCK* (caller must delete)
+ *
+ * Example:
+ *   MBLOCK* decrypted = oes_private_decrypt(ciphertext, privateKey, 0);
+ *   auto [bytes, len] = decrypted->toBytes();
+ *   // Use bytes...
+ *   delete[] bytes;
+ *   delete decrypted;
  */
-OES_BLOCK oes_private_decrypt(OES_BLOCK ciphertext, const m_block* privateKey, m_block seed);
+MBLOCK* oes_private_decrypt(const MBLOCK* ciphertext, const MBLOCK* privateKey, m_block seed);
 
 /**
  * Sign data using private key
  * Creates a digital signature by encrypting with private key
  *
  * @param data Data to sign
- * @param privateKey Private key [modulus, private_exponent]
- * @return Signature OES_BLOCK (caller must free with unset_block)
+ * @param privateKey Private key MBLOCK [modulus, private_exponent]
+ * @return Signature MBLOCK* (caller must delete)
+ *
+ * Example:
+ *   MBLOCK* data = MBLOCK::fromBytes("message", 7);
+ *   MBLOCK* signature = oes_sign(data, privateKey);
+ *   // Use signature...
+ *   delete data;
+ *   delete signature;
  */
-OES_BLOCK oes_sign(OES_BLOCK data, const m_block* privateKey);
+MBLOCK* oes_sign(const MBLOCK* data, const MBLOCK* privateKey);
 
 /**
  * Verify signature using public key
@@ -73,10 +95,17 @@ OES_BLOCK oes_sign(OES_BLOCK data, const m_block* privateKey);
  *
  * @param data Original data
  * @param signature Signature to verify
- * @param publicKey Public key [modulus, public_exponent]
+ * @param publicKey Public key MBLOCK [modulus, public_exponent]
  * @return true if signature is valid, false otherwise
+ *
+ * Example:
+ *   MBLOCK* data = MBLOCK::fromBytes("message", 7);
+ *   MBLOCK* signature = oes_sign(data, privateKey);
+ *   bool valid = oes_verify(data, signature, publicKey);
+ *   delete data;
+ *   delete signature;
  */
-bool oes_verify(OES_BLOCK data, OES_BLOCK signature, const m_block* publicKey);
+bool oes_verify(const MBLOCK* data, const MBLOCK* signature, const MBLOCK* publicKey);
 
 /**
  * Hybrid encryption: encrypt data with symmetric key, then encrypt key with public key
@@ -84,13 +113,20 @@ bool oes_verify(OES_BLOCK data, OES_BLOCK signature, const m_block* publicKey);
  *
  * @param plaintext Data to encrypt
  * @param publicKey Public key for asymmetric encryption
- * @param symmetricKey Symmetric key to use (will be encrypted)
- * @param symmetricKeyLen Length of symmetric key
- * @return Encrypted OES_BLOCK containing [encrypted_key_len, encrypted_key, encrypted_data]
- *         (caller must free with unset_block)
+ * @param symmetricKey Symmetric key MBLOCK to use (will be encrypted)
+ * @return Encrypted MBLOCK* containing [encrypted_key_len, encrypted_key, encrypted_data]
+ *         (caller must delete)
+ *
+ * Example:
+ *   MBLOCK* plaintext = MBLOCK::fromBytes("secret data", 11);
+ *   MBLOCK* symKey = MBLOCK::create(4, 0x12345678);
+ *   MBLOCK* encrypted = oes_hybrid_encrypt(plaintext, publicKey, symKey);
+ *   // Use encrypted...
+ *   delete plaintext;
+ *   delete symKey;
+ *   delete encrypted;
  */
-OES_BLOCK oes_hybrid_encrypt(OES_BLOCK plaintext, const m_block* publicKey,
-                             const m_block* symmetricKey, size_t symmetricKeyLen);
+MBLOCK* oes_hybrid_encrypt(const MBLOCK* plaintext, const MBLOCK* publicKey, const MBLOCK* symmetricKey);
 
 /**
  * Hybrid decryption: decrypt symmetric key with private key, then decrypt data
@@ -98,9 +134,15 @@ OES_BLOCK oes_hybrid_encrypt(OES_BLOCK plaintext, const m_block* publicKey,
  *
  * @param ciphertext Encrypted data from oes_hybrid_encrypt
  * @param privateKey Private key for asymmetric decryption
- * @param symmetricKeyLen Expected length of symmetric key
- * @return Decrypted OES_BLOCK (caller must free with unset_block)
+ * @return Decrypted MBLOCK* (caller must delete)
+ *
+ * Example:
+ *   MBLOCK* decrypted = oes_hybrid_decrypt(ciphertext, privateKey);
+ *   auto [bytes, len] = decrypted->toBytes();
+ *   // Use bytes...
+ *   delete[] bytes;
+ *   delete decrypted;
  */
-OES_BLOCK oes_hybrid_decrypt(OES_BLOCK ciphertext, const m_block* privateKey, size_t symmetricKeyLen);
+MBLOCK* oes_hybrid_decrypt(const MBLOCK* ciphertext, const MBLOCK* privateKey);
 
 #endif // ASYMMETRIC_H

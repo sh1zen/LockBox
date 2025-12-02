@@ -1,8 +1,7 @@
 #ifndef LOCKBOX_ALGO_CORE_H
 #define LOCKBOX_ALGO_CORE_H
 
-#include <OpenES/layer/raw-layer.h>
-#include "oes_common.h"
+#include "m_block.h"
 
 /**
  * OES Post-Quantum Core Encryption Module
@@ -27,42 +26,68 @@
 #define EC_PARAM_A 0x1F3D5B79
 #define EC_PARAM_B 0x2E4C6A8B
 
-/**
- * Raw encryption function - Post-Quantum resistant
- *
- * @param data Input plaintext blocks
- * @param dataLen Number of blocks
- * @param key Encryption key blocks
- * @return Newly allocated ciphertext (caller must free), or nullptr on error
- */
-m_block *raw_enc(const m_block *data, size_t dataLen, const m_block *key);
+// ============================================================================
+// MBLOCK API (RECOMMENDED)
+// ============================================================================
 
 /**
- * Raw decryption function - Post-Quantum resistant
+ * Raw encryption function - Post-Quantum resistant (MBLOCK version)
  *
- * @param data Input ciphertext blocks
- * @param dataLen Number of blocks
- * @param key Decryption key blocks
- * @return Newly allocated plaintext (caller must free), or nullptr on error
+ * @param data Input plaintext MBLOCK
+ * @param key Encryption key MBLOCK
+ * @return Newly allocated ciphertext MBLOCK (caller must delete), or nullptr on error
+ *
+ * Example:
+ *   MBLOCK* plaintext = MBLOCK::fromBytes("Hello", 5);
+ *   MBLOCK* key = MBLOCK::fromBytes("password", 8);
+ *   MBLOCK* ciphertext = raw_enc(plaintext, key);
+ *   // Use ciphertext...
+ *   delete plaintext;
+ *   delete key;
+ *   delete ciphertext;
  */
-m_block *raw_dec(const m_block *data, size_t dataLen, const m_block *key);
+MBLOCK* raw_enc(const MBLOCK* data, const MBLOCK* key);
 
 /**
- * Apply data correlation/diffusion (forward direction)
+ * Raw decryption function - Post-Quantum resistant (MBLOCK version)
  *
- * @param data Data blocks to correlate (modified in place)
- * @param dataLen Number of blocks
+ * @param data Input ciphertext MBLOCK
+ * @param key Decryption key MBLOCK
+ * @return Newly allocated plaintext MBLOCK (caller must delete), or nullptr on error
+ *
+ * Example:
+ *   MBLOCK* decrypted = raw_dec(ciphertext, key);
+ *   auto [bytes, len] = decrypted->toBytes();
+ *   // Use bytes...
+ *   delete[] bytes;
+ *   delete decrypted;
+ */
+MBLOCK* raw_dec(const MBLOCK* data, const MBLOCK* key);
+
+/**
+ * Apply data correlation/diffusion (forward direction) - MBLOCK version
+ *
+ * @param data Data MBLOCK to correlate (modified in place)
  * @param seed Seed value for the transformation
+ *
+ * Example:
+ *   MBLOCK* data = MBLOCK::fromBytes("data", 4);
+ *   correlate_data(data, 0x12345678);
+ *   // data is now correlated
+ *   delete data;
  */
-void correlate_data(m_block *data, size_t dataLen, m_block seed = 0);
+void correlate_data(MBLOCK* data, m_block seed = 0);
 
 /**
- * Apply data uncorrelation/diffusion (inverse direction)
+ * Apply data uncorrelation/diffusion (inverse direction) - MBLOCK version
  *
- * @param data Data blocks to uncorrelate (modified in place)
- * @param dataLen Number of blocks
+ * @param data Data MBLOCK to uncorrelate (modified in place)
  * @param seed Seed value for the transformation (must match correlate_data)
+ *
+ * Example:
+ *   uncorrelate_data(data, 0x12345678);
+ *   // data is now uncorrelated
  */
-void uncorrelate_data(m_block *data, size_t dataLen, m_block seed = 0);
+void uncorrelate_data(MBLOCK* data, m_block seed = 0);
 
 #endif //LOCKBOX_ALGO_CORE_H

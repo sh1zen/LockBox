@@ -1,7 +1,9 @@
 #ifndef LOCKBOX_OESMATH_H
 #define LOCKBOX_OESMATH_H
 
-#include "oes_common.h"
+#include "defines.h"
+#include "m_block.h"
+
 
 size_t closestMultiple(size_t near, size_t multiple);
 
@@ -14,7 +16,6 @@ uint64_t randomGenerator(uint64_t seed);
 m_block deterministicRandomXorShift(m_block seed);
 
 void xTimeMBlock(m_block *w);
-
 
 
 #endif //LOCKBOX_OESMATH_H

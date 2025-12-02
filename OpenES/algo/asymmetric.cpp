@@ -3,9 +3,7 @@
 #include <cstring>
 
 #include "asymmetric.h"
-#include <OpenES/support/support.h>
-
-#include "oes_common.h"
+#include "m_block.h"
 
 /**
  * Modular exponentiation: (base^exp) mod modulus
@@ -48,7 +46,7 @@ static m_block mod_exp(m_block base, m_block exp, m_block modulus) {
  * @param y Pointer to store y coefficient
  * @return gcd(a, b)
  */
-static m_block extended_gcd(m_block a, m_block b, m_block* x, m_block* y) {
+static m_block extended_gcd(m_block a, m_block b, m_block *x, m_block *y) {
     if (a == 0) {
         *x = 0;
         *y = 1;
@@ -91,11 +89,11 @@ static m_block mod_inverse(m_block a, m_block m) {
  *
  * @param p First prime number
  * @param q Second prime number
- * @param publicKey Output array [n, e] where n is modulus, e is public exponent
- * @param privateKey Output array [n, d] where n is modulus, d is private exponent
+ * @param publicKey Output MBLOCK* [n, e] where n is modulus, e is public exponent
+ * @param privateKey Output MBLOCK* [n, d] where n is modulus, d is private exponent
  * @return true if successful, false otherwise
  */
-bool oes_generate_keypair(m_block p, m_block q, m_block* publicKey, m_block* privateKey) {
+bool oes_generate_keypair(m_block p, m_block q, MBLOCK** publicKey, MBLOCK** privateKey) {
     if (!publicKey || !privateKey) {
         return false;
     }
@@ -107,7 +105,7 @@ bool oes_generate_keypair(m_block p, m_block q, m_block* publicKey, m_block* pri
     m_block phi = (p - 1) * (q - 1);
 
     // Choose e (public exponent) - commonly 65537 or just use a smaller value
-    m_block e = 65537;
+    m_block e = (m_block)65537;
     if (e >= phi) {
         e = 3; // Fallback to smaller value
     }
@@ -127,13 +125,17 @@ bool oes_generate_keypair(m_block p, m_block q, m_block* publicKey, m_block* pri
         return false;
     }
 
-    // Public key: (n, e)
-    publicKey[0] = n;
-    publicKey[1] = e;
+    // Create public key: (n, e)
+    auto pubKeyData = new m_block[2];
+    pubKeyData[0] = n;
+    pubKeyData[1] = e;
+    *publicKey = new MBLOCK(pubKeyData, 2, true);
 
-    // Private key: (n, d)
-    privateKey[0] = n;
-    privateKey[1] = d;
+    // Create private key: (n, d)
+    auto privKeyData = new m_block[2];
+    privKeyData[0] = n;
+    privKeyData[1] = d;
+    *privateKey = new MBLOCK(privKeyData, 2, true);
 
     return true;
 }
@@ -142,37 +144,34 @@ bool oes_generate_keypair(m_block p, m_block q, m_block* publicKey, m_block* pri
  * Asymmetric encryption/decryption
  * For each data block: encrypted = (data^exp) mod modulus
  *
- * @param data Input data array
- * @param dataLen Length of data array
- * @param key Key array [modulus, exponent]
- * @param keyLen Length of key array (must be >= 2)
- * @param seed Optional seed for additional randomization (currently unused)
- * @return Encrypted/decrypted OES_BLOCK (caller must free with unset_block)
+ * @param data Input MBLOCK
+ * @param key Key MBLOCK [modulus, exponent]
+ * @param seed Optional seed for additional randomization
+ * @return Encrypted/decrypted MBLOCK* (caller must delete)
  */
-OES_BLOCK oes_asymmetric(const m_block* data, size_t dataLen, const m_block* key, size_t keyLen, m_block seed) {
+MBLOCK* oes_asymmetric(const MBLOCK* data, const MBLOCK* key, m_block seed) {
     // Input validation
-    if (!data || dataLen == 0 || !key || keyLen < 2) {
+    if (!data || data->isNull() || !key || key->isNull() || key->getLen() < 2) {
         return nullptr;
     }
 
-    m_block modulus = key[0];
-    m_block exponent = key[1];
+    m_block modulus = key->getBlock(0);
+    m_block exponent = key->getBlock(1);
 
     // Validate modulus
     if (modulus <= 1) {
         return nullptr;
     }
 
+    size_t dataLen = data->getLen();
+
     // Allocate output buffer
-    auto encodedData = static_cast<m_block*>(malloc(dataLen * sizeof(m_block)));
-    if (!encodedData) {
-        return nullptr;
-    }
+    auto encodedData = new m_block[dataLen];
 
     // Apply modular exponentiation to each block
     for (size_t i = 0; i < dataLen; i++) {
         // Ensure data block is less than modulus
-        m_block block = data[i] % modulus;
+        m_block block = data->getBlock(i) % modulus;
 
         // Apply transformation: block^exponent mod modulus
         encodedData[i] = mod_exp(block, exponent, modulus);
@@ -184,69 +183,53 @@ OES_BLOCK oes_asymmetric(const m_block* data, size_t dataLen, const m_block* key
         }
     }
 
-    // Create output block
-    auto OES_block = static_cast<OES_BLOCK>(malloc(sizeof(oesblock)));
-    if (!OES_block) {
-        secure_memzero(encodedData, dataLen * sizeof(m_block));
-        free(encodedData);
-        return nullptr;
-    }
-
-    OES_block->len = dataLen;
-    OES_block->data = encodedData;
-
-    return OES_block;
+    return new MBLOCK(encodedData, dataLen, true);
 }
 
 /**
  * Encrypt data using public key
  * Wrapper around oes_asymmetric for clarity
  *
- * @param plaintext Input plaintext block
- * @param publicKey Public key [modulus, public_exponent]
+ * @param plaintext Input plaintext MBLOCK
+ * @param publicKey Public key MBLOCK [modulus, public_exponent]
  * @param seed Optional seed value
- * @return Encrypted OES_BLOCK (caller must free with unset_block)
+ * @return Encrypted MBLOCK* (caller must delete)
  */
-OES_BLOCK oes_public_encrypt(OES_BLOCK plaintext, const m_block* publicKey, m_block seed) {
-    if (!plaintext || !plaintext->data || !publicKey) {
+MBLOCK* oes_public_encrypt(const MBLOCK* plaintext, const MBLOCK* publicKey, m_block seed) {
+    if (!plaintext || plaintext->isNull() || !publicKey) {
         return nullptr;
     }
-
-    return oes_asymmetric(plaintext->data, plaintext->len, publicKey, 2, seed);
+    return oes_asymmetric(plaintext, publicKey, seed);
 }
 
 /**
  * Decrypt data using private key
  * Wrapper around oes_asymmetric for clarity
  *
- * @param ciphertext Input ciphertext block
- * @param privateKey Private key [modulus, private_exponent]
+ * @param ciphertext Input ciphertext MBLOCK
+ * @param privateKey Private key MBLOCK [modulus, private_exponent]
  * @param seed Optional seed value (must match encryption seed)
- * @return Decrypted OES_BLOCK (caller must free with unset_block)
+ * @return Decrypted MBLOCK* (caller must delete)
  */
-OES_BLOCK oes_private_decrypt(OES_BLOCK ciphertext, const m_block* privateKey, m_block seed) {
-    if (!ciphertext || !ciphertext->data || !privateKey) {
+MBLOCK* oes_private_decrypt(const MBLOCK* ciphertext, const MBLOCK* privateKey, m_block seed) {
+    if (!ciphertext || ciphertext->isNull() || !privateKey) {
         return nullptr;
     }
-
-    return oes_asymmetric(ciphertext->data, ciphertext->len, privateKey, 2, seed);
+    return oes_asymmetric(ciphertext, privateKey, seed);
 }
 
 /**
  * Sign data using private key
  *
  * @param data Data to sign
- * @param privateKey Private key [modulus, private_exponent]
- * @return Signature OES_BLOCK (caller must free with unset_block)
+ * @param privateKey Private key MBLOCK [modulus, private_exponent]
+ * @return Signature MBLOCK* (caller must delete)
  */
-OES_BLOCK oes_sign(OES_BLOCK data, const m_block* privateKey) {
-    if (!data || !data->data || !privateKey) {
+MBLOCK* oes_sign(const MBLOCK* data, const MBLOCK* privateKey) {
+    if (!data || data->isNull() || !privateKey) {
         return nullptr;
     }
-
-    // For signing, we typically hash the data first
-    // Here we'll just sign the data directly for simplicity
-    return oes_asymmetric(data->data, data->len, privateKey, 2, 0);
+    return oes_asymmetric(data, privateKey, 0);
 }
 
 /**
@@ -254,36 +237,33 @@ OES_BLOCK oes_sign(OES_BLOCK data, const m_block* privateKey) {
  *
  * @param data Original data
  * @param signature Signature to verify
- * @param publicKey Public key [modulus, public_exponent]
+ * @param publicKey Public key MBLOCK [modulus, public_exponent]
  * @return true if signature is valid, false otherwise
  */
-bool oes_verify(OES_BLOCK data, OES_BLOCK signature, const m_block* publicKey) {
-    if (!data || !data->data || !signature || !signature->data || !publicKey) {
+bool oes_verify(const MBLOCK* data, const MBLOCK* signature, const MBLOCK* publicKey) {
+    if (!data || data->isNull() || !signature || signature->isNull() || !publicKey) {
         return false;
     }
 
-    // Decrypt signature
-    OES_BLOCK decrypted = oes_asymmetric(signature->data, signature->len, publicKey, 2, 0);
-    if (!decrypted) {
+    MBLOCK* decrypted = oes_asymmetric(signature, publicKey, 0);
+    if (!decrypted || decrypted->isNull()) {
+        delete decrypted;
         return false;
     }
 
-    // Compare with original data
     bool valid = true;
-    if (decrypted->len != data->len) {
+    if (decrypted->getLen() != data->getLen()) {
         valid = false;
     } else {
-        for (size_t i = 0; i < data->len; i++) {
-            if (decrypted->data[i] != data->data[i]) {
+        for (size_t i = 0; i < data->getLen(); i++) {
+            if (decrypted->getBlock(i) != data->getBlock(i)) {
                 valid = false;
                 break;
             }
         }
     }
 
-    // Cleanup
-    unset_block(&decrypted);
-
+    delete decrypted;
     return valid;
 }
 
@@ -293,63 +273,44 @@ bool oes_verify(OES_BLOCK data, OES_BLOCK signature, const m_block* publicKey) {
  * @param plaintext Data to encrypt
  * @param publicKey Public key for asymmetric encryption
  * @param symmetricKey Symmetric key to use (will be encrypted)
- * @param symmetricKeyLen Length of symmetric key
- * @return Encrypted OES_BLOCK containing [encrypted_key_len, encrypted_key, encrypted_data]
+ * @return Encrypted MBLOCK* containing [encrypted_key_len, encrypted_key, encrypted_data]
  */
-OES_BLOCK oes_hybrid_encrypt(OES_BLOCK plaintext, const m_block* publicKey,
-                             const m_block* symmetricKey, size_t symmetricKeyLen) {
-    if (!plaintext || !plaintext->data || !publicKey || !symmetricKey || symmetricKeyLen == 0) {
+MBLOCK* oes_hybrid_encrypt(const MBLOCK* plaintext, const MBLOCK* publicKey, const MBLOCK* symmetricKey) {
+    if (!plaintext || plaintext->isNull() || !publicKey || !symmetricKey || symmetricKey->isNull()) {
         return nullptr;
     }
 
     // Encrypt the symmetric key with public key
-    OES_BLOCK encryptedKey = oes_asymmetric(symmetricKey, symmetricKeyLen, publicKey, 2, 0);
-    if (!encryptedKey) {
+    MBLOCK* encryptedKey = oes_asymmetric(symmetricKey, publicKey, 0);
+    if (!encryptedKey || encryptedKey->isNull()) {
+        delete encryptedKey;
         return nullptr;
     }
 
-    // Encrypt data with symmetric key (using XOR for simplicity)
-    auto encryptedData = static_cast<m_block*>(malloc(plaintext->len * sizeof(m_block)));
-    if (!encryptedData) {
-        unset_block(&encryptedKey);
-        return nullptr;
+    // Encrypt data with symmetric key (simple XOR)
+    size_t plaintextLen = plaintext->getLen();
+    size_t symKeyLen = symmetricKey->getLen();
+    auto encryptedData = new m_block[plaintextLen];
+
+    for (size_t i = 0; i < plaintextLen; i++) {
+        encryptedData[i] = plaintext->getBlock(i) ^ symmetricKey->getBlock(i % symKeyLen);
     }
 
-    for (size_t i = 0; i < plaintext->len; i++) {
-        encryptedData[i] = plaintext->data[i] ^ symmetricKey[i % symmetricKeyLen];
+    // Combine: [encrypted_key_len, encrypted_key, encrypted_data]
+    size_t encKeyLen = encryptedKey->getLen();
+    size_t totalLen = 1 + encKeyLen + plaintextLen;
+    auto combined = new m_block[totalLen];
+
+    combined[0] = encKeyLen;
+    for (size_t i = 0; i < encKeyLen; i++) {
+        combined[1 + i] = encryptedKey->getBlock(i);
     }
+    std::memcpy(&combined[1 + encKeyLen], encryptedData, plaintextLen * sizeof(m_block));
 
-    // Combine: [key_length, encrypted_key, encrypted_data]
-    size_t totalLen = 1 + encryptedKey->len + plaintext->len;
-    auto combined = static_cast<m_block*>(malloc(totalLen * sizeof(m_block)));
-    if (!combined) {
-        unset_block(&encryptedKey);
-        secure_memzero(encryptedData, plaintext->len * sizeof(m_block));
-        free(encryptedData);
-        return nullptr;
-    }
+    delete[] encryptedData;
+    delete encryptedKey;
 
-    combined[0] = encryptedKey->len; // Store key length
-    memcpy(&combined[1], encryptedKey->data, encryptedKey->len * sizeof(m_block));
-    memcpy(&combined[1 + encryptedKey->len], encryptedData, plaintext->len * sizeof(m_block));
-
-    // Cleanup
-    unset_block(&encryptedKey);
-    secure_memzero(encryptedData, plaintext->len * sizeof(m_block));
-    free(encryptedData);
-
-    // Create output block
-    auto OES_block = static_cast<OES_BLOCK>(malloc(sizeof(oesblock)));
-    if (!OES_block) {
-        secure_memzero(combined, totalLen * sizeof(m_block));
-        free(combined);
-        return nullptr;
-    }
-
-    OES_block->len = totalLen;
-    OES_block->data = combined;
-
-    return OES_block;
+    return new MBLOCK(combined, totalLen, true);
 }
 
 /**
@@ -357,54 +318,43 @@ OES_BLOCK oes_hybrid_encrypt(OES_BLOCK plaintext, const m_block* publicKey,
  *
  * @param ciphertext Encrypted data from oes_hybrid_encrypt
  * @param privateKey Private key for asymmetric decryption
- * @param symmetricKeyLen Expected length of symmetric key
- * @return Decrypted OES_BLOCK
+ * @return Decrypted MBLOCK*
  */
-OES_BLOCK oes_hybrid_decrypt(OES_BLOCK ciphertext, const m_block* privateKey, size_t symmetricKeyLen) {
-    if (!ciphertext || !ciphertext->data || !privateKey || ciphertext->len < 2) {
+MBLOCK* oes_hybrid_decrypt(const MBLOCK* ciphertext, const MBLOCK* privateKey) {
+    if (!ciphertext || ciphertext->isNull() || !privateKey || ciphertext->getLen() < 2) {
         return nullptr;
     }
 
     // Extract encrypted key length
-    size_t encKeyLen = ciphertext->data[0];
-    if (encKeyLen == 0 || 1 + encKeyLen >= ciphertext->len) {
+    size_t encKeyLen = ciphertext->getBlock(0);
+    if (encKeyLen == 0 || 1 + encKeyLen >= ciphertext->getLen()) {
         return nullptr;
     }
+
+    // Extract encrypted key
+    auto encKeyData = new m_block[encKeyLen];
+    for (size_t i = 0; i < encKeyLen; i++) {
+        encKeyData[i] = ciphertext->getBlock(1 + i);
+    }
+    MBLOCK encryptedKey(encKeyData, encKeyLen, true);
 
     // Decrypt the symmetric key
-    OES_BLOCK decryptedKey = oes_asymmetric(&ciphertext->data[1], encKeyLen, privateKey, 2, 0);
-    if (!decryptedKey || decryptedKey->len != symmetricKeyLen) {
-        if (decryptedKey) {
-            unset_block(&decryptedKey);
-        }
+    MBLOCK* decryptedKey = oes_asymmetric(&encryptedKey, privateKey, 0);
+    if (!decryptedKey || decryptedKey->isNull()) {
+        delete decryptedKey;
         return nullptr;
     }
 
-    // Decrypt data
-    size_t dataLen = ciphertext->len - 1 - encKeyLen;
-    auto decryptedData = static_cast<m_block*>(malloc(dataLen * sizeof(m_block)));
-    if (!decryptedData) {
-        unset_block(&decryptedKey);
-        return nullptr;
-    }
+    // Decrypt data with symmetric key
+    size_t dataLen = ciphertext->getLen() - 1 - encKeyLen;
+    auto decryptedData = new m_block[dataLen];
 
+    size_t symKeyLen = decryptedKey->getLen();
     for (size_t i = 0; i < dataLen; i++) {
-        decryptedData[i] = ciphertext->data[1 + encKeyLen + i] ^ decryptedKey->data[i % symmetricKeyLen];
+        decryptedData[i] = ciphertext->getBlock(1 + encKeyLen + i) ^ decryptedKey->getBlock(i % symKeyLen);
     }
 
-    // Cleanup key
-    unset_block(&decryptedKey);
+    delete decryptedKey;
 
-    // Create output block
-    auto OES_block = static_cast<OES_BLOCK>(malloc(sizeof(oesblock)));
-    if (!OES_block) {
-        secure_memzero(decryptedData, dataLen * sizeof(m_block));
-        free(decryptedData);
-        return nullptr;
-    }
-
-    OES_block->len = dataLen;
-    OES_block->data = decryptedData;
-
-    return OES_block;
+    return new MBLOCK(decryptedData, dataLen, true);
 }

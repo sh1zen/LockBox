@@ -1,159 +1,173 @@
-#include <cstdlib>
-#include <cstring>
 #include <iostream>
+#include <vector>
 
 #include <OpenES/support/oesMath.h>
-#include <OpenES/support/support.h>
 #include "core.h"
-#include "key_managment.h"
+#include "key_management.h"
 #include "block_ciphers.h"
-#include "converter.h"
-
 #include "defines.h"
+#include "m_block.h"
+#include "raw-layer.h"
 
-/**
- * Helper function to safely update an IV block
- * Takes ownership of newData
- */
-static void update_iv(OES_BLOCK *iv, m_block *newData, size_t newLen) {
-    if (!iv) {
-        // No IV pointer - just free the data
-        if (newData) {
-            secure_memzero(newData, newLen * sizeof(m_block));
-            free(newData);
-        }
-        return;
+// Helper function to get or create IV
+static MBLOCK *get_or_create_iv(MBLOCK *iv, size_t blockSize, m_block defaultValue) {
+    if (!iv || iv->isNull()) {
+        // Create new IV with default value
+        return MBLOCK::create(blockSize, defaultValue);
     }
 
-    if (*iv) {
-        // Free old IV data
-        if ((*iv)->data) {
-            secure_memzero((*iv)->data, (*iv)->len * sizeof(m_block));
-            free((*iv)->data);
-        }
-        // Reuse existing structure
-        (*iv)->data = newData;
-        (*iv)->len = newLen;
-    } else {
-        // Allocate new IV structure
-        *iv = static_cast<OES_BLOCK>(malloc(sizeof(oesblock)));
-        if (*iv) {
-            (*iv)->data = newData;
-            (*iv)->len = newLen;
-        } else {
-            // Allocation failed - free the data
-            if (newData) {
-                secure_memzero(newData, newLen * sizeof(m_block));
-                free(newData);
-            }
-        }
-    }
-}
+    const auto iv_clone = iv->clone();
 
-/**
- * Helper to get IV data, creating default if needed
- * Returns a COPY of the IV data (caller must free)
- */
-static m_block* get_iv_copy(OES_BLOCK *iv, size_t blockSize, m_block defaultValue) {
-    if (iv && *iv && (*iv)->data && (*iv)->len >= blockSize) {
-        return mBlock_clone(nullptr, (*iv)->data, blockSize);
+    // Clone and extend if necessary
+    if (iv_clone->getLen() < blockSize) {
+        iv_clone->extend(blockSize, defaultValue);
     }
-    return mBlock_create(blockSize, defaultValue);
+
+    return iv_clone;
 }
 
 /**
  * Advanced encryption with PBKDF-based round keys
  */
-OES_BLOCK oes_enc_adv(OES_BLOCK plain, OES_KEY key, size_t *session) {
-    if (!plain || !plain->data || !key || !key->string) {
+MBLOCK *oes_enc_adv(const MBLOCK *plain, const MBLOCK *key, size_t *session) {
+    if (!plain || plain->isNull() || !key || key->isNull()) {
         return nullptr;
     }
 
-    size_t cipherLen = closestMultiple(plain->len, OES_BLOCK_SIZE);
+    size_t plainLen = plain->getLen();
+    size_t cipherLen = closestMultiple(plainLen + 2,OES_NUM_OF_BLOCK);
     size_t roundSession = session ? *session : 0;
 
-    auto cipher = static_cast<m_block *>(malloc(cipherLen * sizeof(m_block)));
+    // Create padded version
+    MBLOCK *cipher = plain->add_padding_outer(cipherLen, 0);
     if (!cipher) {
         return nullptr;
     }
 
-    m_block *data2process = mBlock_padding_einer(plain->data, plain->len, cipherLen, 0);
-    if (!data2process) {
-        free(cipher);
-        return nullptr;
-    }
+    //todo add randomdata at cipherLen - 2
+    /*
+    #include <chrono>
+    auto now = std::chrono::system_clock::now();
 
-    for (size_t i = 0; i < cipherLen; i += OES_BLOCK_SIZE) {
-        m_block **roundKey = PBKDF(key->string, key->len, OES_BLOCK_SIZE, 2, roundSession, 2);
-        if (!roundKey || !roundKey[0] || !roundKey[1]) {
-            cleanup_pbkdf_keys(roundKey, 2, OES_BLOCK_SIZE);
-            secure_memzero(cipher, i * sizeof(m_block));
-            free(cipher);
-            secure_memzero(data2process, cipherLen * sizeof(m_block));
-            free(data2process);
+    cipher->setBlock(cipherLen - 2, 0);
+    */
+
+
+    for (size_t i = 0; i < cipherLen; i += OES_NUM_OF_BLOCK) {
+        // Generate round keys using new PBKDF
+        std::vector<MBLOCK *> roundKeys = PBKDF(*key, OES_NUM_OF_BLOCK, 2, roundSession, 2);
+
+        if (roundKeys.empty() || roundKeys.size() != 2 ||
+            !roundKeys[0] || roundKeys[0]->isNull() ||
+            !roundKeys[1] || roundKeys[1]->isNull()) {
+            cleanup_pbkdf_keys(roundKeys);
+            delete cipher;
             return nullptr;
         }
 
-        memcpy(&(cipher[i]), &data2process[i], OES_BLOCK_SIZE * sizeof(m_block));
-        mBlock_xor(&(cipher[i]), roundKey[0], OES_BLOCK_SIZE, true);
-        correlate_data(&(cipher[i]), OES_BLOCK_SIZE, roundSession);
-        mBlock_xor(&(cipher[i]), roundKey[1], OES_BLOCK_SIZE, true);
+        // Create a sub-block for the current block
+        MBLOCK *blockData = MBLOCK::create(OES_NUM_OF_BLOCK, 0);
+        if (!blockData) {
+            cleanup_pbkdf_keys(roundKeys);
+            delete cipher;
+            return nullptr;
+        }
 
-        // Cleanup round keys
-        cleanup_pbkdf_keys(roundKey, 2, OES_BLOCK_SIZE);
+        // Copy current block
+        for (size_t j = 0; j < OES_NUM_OF_BLOCK; j++) {
+            blockData->setBlock(j, cipher->getBlock(i + j));
+        }
 
+        // XOR with first round key (TUTTI i byte, non solo i pari)
+        for (size_t j = 0; j < OES_NUM_OF_BLOCK; j++) {
+            m_block value = blockData->getBlock(j) ^ roundKeys[0]->getBlock(j);
+            blockData->setBlock(j, value);
+        }
+
+        // Correlate data
+        correlate_data(blockData, roundSession);
+
+        // XOR with second round key (TUTTI i byte, non solo i pari)
+        for (size_t j = 0; j < OES_NUM_OF_BLOCK; j++) {
+            m_block value = blockData->getBlock(j) ^ roundKeys[1]->getBlock(j);
+            blockData->setBlock(j, value);
+        }
+
+        // Copy back to cipher
+        for (size_t j = 0; j < OES_NUM_OF_BLOCK; j++) {
+            cipher->setBlock(i + j, blockData->getBlock(j));
+        }
+
+        delete blockData;
+        cleanup_pbkdf_keys(roundKeys);
         roundSession++;
     }
-
-    secure_memzero(data2process, cipherLen * sizeof(m_block));
-    free(data2process);
 
     if (session) {
         *session = roundSession;
     }
 
-    auto OES_block = static_cast<OES_BLOCK>(malloc(sizeof(oesblock)));
-    if (!OES_block) {
-        secure_memzero(cipher, cipherLen * sizeof(m_block));
-        free(cipher);
-        return nullptr;
-    }
-
-    OES_block->len = cipherLen;
-    OES_block->data = cipher;
-
-    return OES_block;
+    return cipher;
 }
 
-OES_BLOCK oes_dec_adv(OES_BLOCK cipher, OES_KEY key, size_t *session) {
-    if (!cipher || !cipher->data || !key || !key->string) {
+MBLOCK *oes_dec_adv(const MBLOCK *cipher, const MBLOCK *key, size_t *session) {
+    if (!cipher || cipher->isNull() || !key || key->isNull()) {
         return nullptr;
     }
 
+    size_t cipherLen = cipher->getLen();
     size_t roundSession = session ? *session : 0;
 
-    auto plain = static_cast<m_block *>(malloc(cipher->len * sizeof(m_block)));
-    if (!plain) {
-        return nullptr;
-    }
+    // Create plain MBLOCK as a clone of cipher
+    MBLOCK *plain = cipher->clone();
 
-    for (size_t i = 0; i < cipher->len; i += OES_BLOCK_SIZE) {
-        m_block **roundKey = PBKDF(key->string, key->len, OES_BLOCK_SIZE, 2, roundSession, 2);
-        if (!roundKey || !roundKey[0] || !roundKey[1]) {
-            cleanup_pbkdf_keys(roundKey, 2, OES_BLOCK_SIZE);
-            secure_memzero(plain, i * sizeof(m_block));
-            free(plain);
+    for (size_t i = 0; i < cipherLen; i += OES_NUM_OF_BLOCK) {
+        // Generate round keys using new PBKDF
+        std::vector<MBLOCK *> roundKeys = PBKDF(*key, OES_NUM_OF_BLOCK, 2, roundSession, 2);
+
+        if (roundKeys.empty() || roundKeys.size() != 2 ||
+            !roundKeys[0] || roundKeys[0]->isNull() ||
+            !roundKeys[1] || roundKeys[1]->isNull()) {
+            cleanup_pbkdf_keys(roundKeys);
+            delete plain;
             return nullptr;
         }
 
-        memcpy(&(plain[i]), &cipher->data[i], OES_BLOCK_SIZE * sizeof(m_block));
-        mBlock_xor(&(plain[i]), roundKey[1], OES_BLOCK_SIZE, true);
-        uncorrelate_data(&(plain[i]), OES_BLOCK_SIZE, roundSession);
-        mBlock_xor(&(plain[i]), roundKey[0], OES_BLOCK_SIZE, true);
+        // Create a sub-block for the current block
+        MBLOCK *blockData = MBLOCK::create(OES_NUM_OF_BLOCK, 0);
+        if (!blockData) {
+            cleanup_pbkdf_keys(roundKeys);
+            delete plain;
+            return nullptr;
+        }
 
-        // Cleanup round keys
-        cleanup_pbkdf_keys(roundKey, 2, OES_BLOCK_SIZE);
+        // Copy current block
+        for (size_t j = 0; j < OES_NUM_OF_BLOCK; j++) {
+            blockData->setBlock(j, plain->getBlock(i + j));
+        }
 
+        // XOR with second round key (TUTTI i byte, non solo i pari)
+        for (size_t j = 0; j < OES_NUM_OF_BLOCK; j++) {
+            m_block value = blockData->getBlock(j) ^ roundKeys[1]->getBlock(j);
+            blockData->setBlock(j, value);
+        }
+
+        // Uncorrelate data
+        uncorrelate_data(blockData, roundSession);
+
+        // XOR with first round key (TUTTI i byte, non solo i pari)
+        for (size_t j = 0; j < OES_NUM_OF_BLOCK; j++) {
+            m_block value = blockData->getBlock(j) ^ roundKeys[0]->getBlock(j);
+            blockData->setBlock(j, value);
+        }
+
+        // Copy back to plain
+        for (size_t j = 0; j < OES_NUM_OF_BLOCK; j++) {
+            plain->setBlock(i + j, blockData->getBlock(j));
+        }
+
+        delete blockData;
+        cleanup_pbkdf_keys(roundKeys);
         roundSession++;
     }
 
@@ -161,568 +175,587 @@ OES_BLOCK oes_dec_adv(OES_BLOCK cipher, OES_KEY key, size_t *session) {
         *session = roundSession;
     }
 
-    auto OES_block = static_cast<OES_BLOCK>(malloc(sizeof(oesblock)));
-    if (!OES_block) {
-        secure_memzero(plain, cipher->len * sizeof(m_block));
-        free(plain);
+    // Remove padding
+    size_t padding = plain->get_padding_size_outer();
+    size_t outLen = cipherLen - padding;
+
+    // Create output with correct length
+    MBLOCK *result = MBLOCK::create(outLen, 0);
+    if (!result) {
+        delete plain;
         return nullptr;
     }
 
-    OES_block->len = cipher->len - mBlock_get_padding_einer(cipher->data, cipher->len, false, 0);
-    OES_block->data = plain;
+    for (size_t i = 0; i < outLen; i++) {
+        result->setBlock(i, plain->getBlock(i));
+    }
 
-    return OES_block;
+    delete plain;
+    return result;
 }
 
 /**
  * Cipher key expansion (rounded)
  */
-OES_BLOCK oes_enc_cke(OES_BLOCK plain, OES_KEY key, m_block seed) {
-    if (!plain || !plain->data || !key || !key->string) {
+MBLOCK *oes_enc_cke(const MBLOCK *plain, const MBLOCK *key, m_block seed) {
+    if (!plain || plain->isNull() || !key || key->isNull()) {
         return nullptr;
     }
 
-    m_block *keyExpanded = key_expansion(key->string, key->len, plain->len, seed, 10);
-    if (!keyExpanded) {
+    size_t plainLen = plain->getLen();
+
+    MBLOCK *keyExpanded = key_expansion(key, plainLen, seed, 10);
+    if (!keyExpanded || keyExpanded->isNull()) {
+        if (keyExpanded) delete keyExpanded;
         return nullptr;
     }
 
-    m_block *xorKey = key_expansion(key->string, key->len, plain->len, mBlock_rotr(seed, 5), 10);
-    if (!xorKey) {
-        secure_memzero(keyExpanded, plain->len * sizeof(m_block));
-        free(keyExpanded);
+    MBLOCK *xorKey = key_expansion(key, plainLen, mBlock_rotr(seed, 5), 10);
+    if (!xorKey || xorKey->isNull()) {
+        delete keyExpanded;
+        delete xorKey;
         return nullptr;
     }
 
-    m_block *cipher = raw_enc(plain->data, plain->len, keyExpanded);
-    if (!cipher) {
-        secure_memzero(keyExpanded, plain->len * sizeof(m_block));
-        secure_memzero(xorKey, plain->len * sizeof(m_block));
-        free(keyExpanded);
-        free(xorKey);
+    // Encrypt using raw_enc
+    MBLOCK *cipherBlock = raw_enc(plain, keyExpanded);
+    if (!cipherBlock || cipherBlock->isNull()) {
+        delete keyExpanded;
+        delete xorKey;
+        if (cipherBlock) delete cipherBlock;
         return nullptr;
     }
 
-    mBlock_xor(cipher, xorKey, plain->len, true);
-
-    // Cleanup sensitive data
-    secure_memzero(keyExpanded, plain->len * sizeof(m_block));
-    secure_memzero(xorKey, plain->len * sizeof(m_block));
-    free(keyExpanded);
-    free(xorKey);
-
-    auto OES_block = static_cast<OES_BLOCK>(malloc(sizeof(oesblock)));
-    if (!OES_block) {
-        secure_memzero(cipher, plain->len * sizeof(m_block));
-        free(cipher);
-        return nullptr;
+    // XOR with xorKey (alternate)
+    for (size_t i = 0; i < plainLen; i++) {
+        if (i % 2 == 0) {
+            m_block value = cipherBlock->getBlock(i) ^ xorKey->getBlock(i);
+            cipherBlock->setBlock(i, value);
+        }
     }
 
-    OES_block->len = plain->len;
-    OES_block->data = cipher;
+    delete keyExpanded;
+    delete xorKey;
 
-    return OES_block;
+    return cipherBlock;
 }
 
-OES_BLOCK oes_dec_cke(OES_BLOCK cipher, OES_KEY key, m_block seed) {
-    if (!cipher || !cipher->data || !key || !key->string) {
+MBLOCK *oes_dec_cke(const MBLOCK *cipher, const MBLOCK *key, m_block seed) {
+    if (!cipher || cipher->isNull() || !key || key->isNull()) {
         return nullptr;
     }
 
-    m_block *keyExpanded = key_expansion(key->string, key->len, cipher->len, seed, 10);
-    if (!keyExpanded) {
+    size_t cipherLen = cipher->getLen();
+
+    MBLOCK *keyExpanded = key_expansion(key, cipherLen, seed, 10);
+    if (!keyExpanded || keyExpanded->isNull()) {
+        if (keyExpanded) delete keyExpanded;
         return nullptr;
     }
 
-    m_block *xorKey = key_expansion(key->string, key->len, cipher->len, mBlock_rotr(seed, 5), 10);
-    if (!xorKey) {
-        secure_memzero(keyExpanded, cipher->len * sizeof(m_block));
-        free(keyExpanded);
+    MBLOCK *xorKey = key_expansion(key, cipherLen, mBlock_rotr(seed, 5), 10);
+    if (!xorKey || xorKey->isNull()) {
+        delete keyExpanded;
+        if (xorKey) delete xorKey;
         return nullptr;
     }
 
-    // PRIMA: copia i dati del cipher per non modificare l'originale
-    m_block *cipher_copy = static_cast<m_block*>(malloc(cipher->len * sizeof(m_block)));
-    if (!cipher_copy) {
-        secure_memzero(keyExpanded, cipher->len * sizeof(m_block));
-        secure_memzero(xorKey, cipher->len * sizeof(m_block));
-        free(keyExpanded);
-        free(xorKey);
-        return nullptr;
-    }
-    memcpy(cipher_copy, cipher->data, cipher->len * sizeof(m_block));
+    // Clone cipher and XOR with xorKey
+    MBLOCK *cipherCopy = cipher->clone();
 
-    // PRIMA: rimuovi lo XOR layer
-    mBlock_xor(cipher_copy, xorKey, cipher->len, true);
-
-    // POI: decrypt
-    m_block *plain = raw_dec(cipher_copy, cipher->len, keyExpanded);
-
-    // Cleanup della copia
-    secure_memzero(cipher_copy, cipher->len * sizeof(m_block));
-    free(cipher_copy);
-
-    if (!plain) {
-        secure_memzero(keyExpanded, cipher->len * sizeof(m_block));
-        secure_memzero(xorKey, cipher->len * sizeof(m_block));
-        free(keyExpanded);
-        free(xorKey);
-        return nullptr;
+    // XOR with xorKey (alternate)
+    for (size_t i = 0; i < cipherLen; i++) {
+        if (i % 2 == 0) {
+            m_block value = cipherCopy->getBlock(i) ^ xorKey->getBlock(i);
+            cipherCopy->setBlock(i, value);
+        }
     }
 
-    // Cleanup sensitive data
-    secure_memzero(keyExpanded, cipher->len * sizeof(m_block));
-    secure_memzero(xorKey, cipher->len * sizeof(m_block));
-    free(keyExpanded);
-    free(xorKey);
+    // Decrypt using raw_dec
+    MBLOCK *plainBlock = raw_dec(cipherCopy, keyExpanded);
 
-    auto OES_block = static_cast<OES_BLOCK>(malloc(sizeof(oesblock)));
-    if (!OES_block) {
-        secure_memzero(plain, cipher->len * sizeof(m_block));
-        free(plain);
-        return nullptr;
-    }
+    delete cipherCopy;
+    delete keyExpanded;
+    delete xorKey;
 
-    OES_block->len = cipher->len;
-    OES_block->data = plain;
-
-    return OES_block;
+    return plainBlock;
 }
 
 /**
  * Counter mode encryption
  */
-OES_BLOCK oes_enc_ctr(OES_BLOCK plain, OES_KEY key, m_block seed, m_block *counter) {
-    if (!plain || !plain->data || !key || !key->string) {
+MBLOCK *oes_enc_ctr(const MBLOCK *plain, const MBLOCK *key, m_block seed, m_block *counter) {
+    if (!plain || plain->isNull() || !key || key->isNull()) {
         return nullptr;
     }
 
-    size_t blockSize = MAX(key->len, OES_BLOCK_SIZE);
-    size_t cipherLen = closestMultiple(plain->len, blockSize);
+    size_t plainLen = plain->getLen();
+    size_t keyLen = key->getLen();
+    size_t blockSize = MAX(keyLen, OES_NUM_OF_BLOCK);
+    size_t cipherLen = closestMultiple(plainLen + 1, blockSize);
 
-    auto cipher = static_cast<m_block *>(malloc(cipherLen * sizeof(m_block)));
+    // Create padded version
+    MBLOCK *paddedPlain = plain->add_padding_outer(cipherLen, 0);
+    if (!paddedPlain) {
+        return nullptr;
+    }
+
+    // Create cipher MBLOCK
+    MBLOCK *cipher = MBLOCK::create(cipherLen, 0);
     if (!cipher) {
+        delete paddedPlain;
         return nullptr;
     }
 
-    m_block *data2process = mBlock_padding_einer(plain->data, plain->len, cipherLen, 0);
-    if (!data2process) {
-        free(cipher);
+    // Create nonce/counter block using MBLOCK::create
+    MBLOCK *nonceCounterBlock = MBLOCK::create(blockSize, seed);
+    if (!nonceCounterBlock) {
+        delete cipher;
+        delete paddedPlain;
         return nullptr;
     }
 
-    m_block *nonceCounter = mBlock_create(blockSize, seed);
-    if (!nonceCounter) {
-        free(cipher);
-        secure_memzero(data2process, cipherLen * sizeof(m_block));
-        free(data2process);
-        return nullptr;
-    }
-
-    nonceCounter[blockSize - 1] = counter ? *counter : 0;
+    // Set counter value
+    nonceCounterBlock->setBlock(blockSize - 1, counter ? *counter : 0);
 
     for (size_t i = 0; i < cipherLen; i += blockSize) {
-        // CTR mode: encrypt the counter
-        m_block *encNonceCounter = raw_enc(nonceCounter, blockSize, key->string);
-        if (!encNonceCounter) {
-            secure_memzero(cipher, i * sizeof(m_block));
-            free(cipher);
-            secure_memzero(data2process, cipherLen * sizeof(m_block));
-            free(data2process);
-            secure_memzero(nonceCounter, blockSize * sizeof(m_block));
-            free(nonceCounter);
+        // Create MBLOCK for nonce/counter
+        MBLOCK *nonceCounter = MBLOCK::create(blockSize, 0);
+        if (!nonceCounter) {
+            delete cipher;
+            delete paddedPlain;
+            delete nonceCounterBlock;
             return nullptr;
         }
 
-        // Copy plaintext
-        m_block *result = mBlock_clone(nullptr, &data2process[i], blockSize);
-        if (!result) {
-            secure_memzero(cipher, i * sizeof(m_block));
-            free(cipher);
-            secure_memzero(data2process, cipherLen * sizeof(m_block));
-            free(data2process);
-            secure_memzero(nonceCounter, blockSize * sizeof(m_block));
-            free(nonceCounter);
-            secure_memzero(encNonceCounter, blockSize * sizeof(m_block));
-            free(encNonceCounter);
+        for (size_t j = 0; j < blockSize; j++) {
+            nonceCounter->setBlock(j, nonceCounterBlock->getBlock(j));
+        }
+
+        // Encrypt nonce/counter
+        MBLOCK *encNonceCounter = raw_enc(nonceCounter, key);
+        delete nonceCounter;
+
+        if (!encNonceCounter || encNonceCounter->isNull()) {
+            delete cipher;
+            delete paddedPlain;
+            delete nonceCounterBlock;
+            if (encNonceCounter) delete encNonceCounter;
             return nullptr;
         }
 
-        // XOR: result = plaintext XOR keystream
-        mBlock_xor(result, encNonceCounter, blockSize, true);
+        // XOR plain block with encrypted nonce
+        for (size_t j = 0; j < blockSize && (i + j) < cipherLen; j++) {
+            m_block plainValue = paddedPlain->getBlock(i + j);
+            m_block encValue = encNonceCounter->getBlock(j);
+            cipher->setBlock(i + j, plainValue ^ encValue);
+        }
 
-        // Copy result to ciphertext
-        memcpy(&(cipher[i]), result, blockSize * sizeof(m_block));
-
-        // Free temporary buffers
-        secure_memzero(result, blockSize * sizeof(m_block));
-        free(result);
-        secure_memzero(encNonceCounter, blockSize * sizeof(m_block));
-        free(encNonceCounter);
+        delete encNonceCounter;
 
         // Increment counter
-        nonceCounter[blockSize - 1]++;
-        if (counter) {
-            (*counter)++;
-        }
+        m_block currentCounter = nonceCounterBlock->getBlock(blockSize - 1);
+        nonceCounterBlock->setBlock(blockSize - 1, currentCounter + 1);
+        if (counter) (*counter)++;
     }
 
-    secure_memzero(data2process, cipherLen * sizeof(m_block));
-    free(data2process);
-    secure_memzero(nonceCounter, blockSize * sizeof(m_block));
-    free(nonceCounter);
+    delete paddedPlain;
+    delete nonceCounterBlock;
 
-    auto OES_block = static_cast<OES_BLOCK>(malloc(sizeof(oesblock)));
-    if (!OES_block) {
-        secure_memzero(cipher, cipherLen * sizeof(m_block));
-        free(cipher);
-        return nullptr;
-    }
-
-    OES_block->len = cipherLen;
-    OES_block->data = cipher;
-
-    return OES_block;
+    return cipher;
 }
 
-OES_BLOCK oes_dec_ctr(OES_BLOCK cipher, OES_KEY key, m_block seed, m_block *counter) {
-    if (!cipher || !cipher->data || !key || !key->string) {
+MBLOCK *oes_dec_ctr(const MBLOCK *cipher, const MBLOCK *key, m_block seed, m_block *counter) {
+    if (!cipher || cipher->isNull() || !key || key->isNull()) {
         return nullptr;
     }
 
-    size_t blockSize = MAX(key->len, OES_BLOCK_SIZE);
+    size_t cipherLen = cipher->getLen();
+    size_t keyLen = key->getLen();
+    size_t blockSize = MAX(keyLen, OES_NUM_OF_BLOCK);
 
-    auto plain = static_cast<m_block *>(malloc(cipher->len * sizeof(m_block)));
+    // Create plain MBLOCK
+    MBLOCK *plain = MBLOCK::create(cipherLen, 0);
     if (!plain) {
         return nullptr;
     }
 
-    m_block *nonceCounter = mBlock_create(blockSize, seed);
-    if (!nonceCounter) {
-        free(plain);
+    // Create nonce/counter block using MBLOCK::create
+    MBLOCK *nonceCounterBlock = MBLOCK::create(blockSize, seed);
+    if (!nonceCounterBlock) {
+        delete plain;
         return nullptr;
     }
 
-    nonceCounter[blockSize - 1] = counter ? *counter : 0;
+    // Set counter value
+    nonceCounterBlock->setBlock(blockSize - 1, counter ? *counter : 0);
 
-    for (size_t i = 0; i < cipher->len; i += blockSize) {
-        // CTR mode: encrypt the counter
-        m_block *encNonceCounter = raw_enc(nonceCounter, blockSize, key->string);
-        if (!encNonceCounter) {
-            secure_memzero(plain, i * sizeof(m_block));
-            free(plain);
-            secure_memzero(nonceCounter, blockSize * sizeof(m_block));
-            free(nonceCounter);
+    for (size_t i = 0; i < cipherLen; i += blockSize) {
+        // Create MBLOCK for nonce/counter
+        MBLOCK *nonceCounter = MBLOCK::create(blockSize, 0);
+        if (!nonceCounter) {
+            delete plain;
+            delete nonceCounterBlock;
             return nullptr;
         }
 
-        // Copy ciphertext
-        m_block *result = mBlock_clone(nullptr, &(cipher->data[i]), blockSize);
-        if (!result) {
-            secure_memzero(plain, i * sizeof(m_block));
-            free(plain);
-            secure_memzero(nonceCounter, blockSize * sizeof(m_block));
-            free(nonceCounter);
-            secure_memzero(encNonceCounter, blockSize * sizeof(m_block));
-            free(encNonceCounter);
+        for (size_t j = 0; j < blockSize; j++) {
+            nonceCounter->setBlock(j, nonceCounterBlock->getBlock(j));
+        }
+
+        // Encrypt nonce/counter
+        MBLOCK *encNonceCounter = raw_enc(nonceCounter, key);
+        delete nonceCounter;
+
+        if (!encNonceCounter || encNonceCounter->isNull()) {
+            delete plain;
+            delete nonceCounterBlock;
+            if (encNonceCounter) delete encNonceCounter;
             return nullptr;
         }
 
-        // XOR: result = ciphertext XOR keystream
-        mBlock_xor(result, encNonceCounter, blockSize, true);
+        // XOR cipher block with encrypted nonce
+        for (size_t j = 0; j < blockSize && (i + j) < cipherLen; j++) {
+            m_block cipherValue = cipher->getBlock(i + j);
+            m_block encValue = encNonceCounter->getBlock(j);
+            plain->setBlock(i + j, cipherValue ^ encValue);
+        }
 
-        // Copy result to plaintext
-        memcpy(&(plain[i]), result, blockSize * sizeof(m_block));
-
-        // Free temporary buffers
-        secure_memzero(result, blockSize * sizeof(m_block));
-        free(result);
-        secure_memzero(encNonceCounter, blockSize * sizeof(m_block));
-        free(encNonceCounter);
+        delete encNonceCounter;
 
         // Increment counter
-        nonceCounter[blockSize - 1]++;
-        if (counter) {
-            (*counter)++;
-        }
+        m_block currentCounter = nonceCounterBlock->getBlock(blockSize - 1);
+        nonceCounterBlock->setBlock(blockSize - 1, currentCounter + 1);
+        if (counter) (*counter)++;
     }
 
-    secure_memzero(nonceCounter, blockSize * sizeof(m_block));
-    free(nonceCounter);
+    delete nonceCounterBlock;
 
-    auto OES_block = static_cast<OES_BLOCK>(malloc(sizeof(oesblock)));
-    if (!OES_block) {
-        secure_memzero(plain, cipher->len * sizeof(m_block));
-        free(plain);
+    // Remove padding
+    uint32_t padding = plain->get_padding_size_outer();
+    size_t outLen = cipherLen - padding;
+
+    // Create output with correct length
+    MBLOCK *result = MBLOCK::create(outLen, 0);
+    if (!result) {
+        delete plain;
         return nullptr;
     }
 
-    OES_block->len = cipher->len - mBlock_get_padding_einer(cipher->data, cipher->len, false, 0);
-    OES_block->data = plain;
+    for (size_t i = 0; i < outLen; i++) {
+        result->setBlock(i, plain->getBlock(i));
+    }
 
-    return OES_block;
+    delete plain;
+    return result;
 }
 
 /**
  * Cipher Block Chaining encryption
  */
-OES_BLOCK oes_enc_cbc(OES_BLOCK plain, OES_KEY key, OES_BLOCK *iv) {
-    if (!plain || !plain->data || !key || !key->string) {
+MBLOCK *oes_enc_cbc(const MBLOCK *plain, const MBLOCK *key, MBLOCK **iv) {
+    if (!plain || plain->isNull() || !key || key->isNull()) {
         return nullptr;
     }
 
-    size_t blockSize = MAX(key->len, OES_BLOCK_SIZE);
-    size_t cipherLen = closestMultiple(plain->len, blockSize);
+    size_t plainLen = plain->getLen();
+    size_t keyLen = key->getLen();
+    size_t blockSize = MAX(keyLen, OES_NUM_OF_BLOCK);
+    size_t cipherLen = closestMultiple(plainLen + 1, blockSize);
 
-    auto cipher = static_cast<m_block *>(malloc(cipherLen * sizeof(m_block)));
+    // Create padded version
+    MBLOCK *paddedPlain = plain->add_padding_outer(cipherLen, 0);
+    if (!paddedPlain) {
+        return nullptr;
+    }
+
+    // Create cipher MBLOCK
+    MBLOCK *cipher = MBLOCK::create(cipherLen, 0);
     if (!cipher) {
+        delete paddedPlain;
         return nullptr;
     }
 
-    auto *data2process = mBlock_padding_einer(plain->data, plain->len, cipherLen, 0);
-    if (!data2process) {
-        free(cipher);
-        return nullptr;
-    }
-
-    // Get a working copy of the IV
-    m_block *IV = get_iv_copy(iv, blockSize, m_block(0x455e69f3));
-    if (!IV) {
-        free(cipher);
-        secure_memzero(data2process, cipherLen * sizeof(m_block));
-        free(data2process);
+    // Keep a reference to the previous cipher block (starts with IV)
+    MBLOCK *prevBlock = get_or_create_iv(iv ? *iv : nullptr, blockSize, m_block(0x455e69f3));
+    if (!prevBlock) {
+        delete cipher;
+        delete paddedPlain;
         return nullptr;
     }
 
     for (size_t i = 0; i < cipherLen; i += blockSize) {
-        // CBC encryption: ciphertext = encrypt(plaintext XOR IV)
-
-        // Create a copy of current plaintext block
-        m_block *temp = mBlock_clone(nullptr, &data2process[i], blockSize);
+        // Create temp MBLOCK for XOR with previous block
+        MBLOCK *temp = MBLOCK::create(blockSize, 0);
         if (!temp) {
-            secure_memzero(cipher, i * sizeof(m_block));
-            free(cipher);
-            secure_memzero(data2process, cipherLen * sizeof(m_block));
-            free(data2process);
-            secure_memzero(IV, blockSize * sizeof(m_block));
-            free(IV);
+            delete cipher;
+            delete paddedPlain;
+            delete prevBlock;
             return nullptr;
         }
 
-        // XOR: temp = temp XOR IV
-        mBlock_xor(temp, IV, blockSize, true);
+        // XOR plaintext block with previous cipher block (or IV for first block)
+        for (size_t j = 0; j < blockSize; j++) {
+            temp->setBlock(j, paddedPlain->getBlock(i + j) ^ prevBlock->getBlock(j));
+        }
 
-        // Encrypt the XOR result
-        m_block *encdata = raw_enc(temp, blockSize, key->string);
+        // Encrypt the XORed data
+        MBLOCK *encdata = raw_enc(temp, key);
+        delete temp;
 
-        // Free temp (no longer needed)
-        secure_memzero(temp, blockSize * sizeof(m_block));
-        free(temp);
-
-        if (!encdata) {
-            secure_memzero(cipher, i * sizeof(m_block));
-            free(cipher);
-            secure_memzero(data2process, cipherLen * sizeof(m_block));
-            free(data2process);
-            secure_memzero(IV, blockSize * sizeof(m_block));
-            free(IV);
+        if (!encdata || encdata->isNull()) {
+            delete cipher;
+            delete paddedPlain;
+            delete prevBlock;
             return nullptr;
         }
 
-        // Copy ciphertext to output buffer
-        memcpy(&(cipher[i]), encdata, blockSize * sizeof(m_block));
+        // Copy encrypted data to cipher output
+        for (size_t j = 0; j < blockSize; j++) {
+            cipher->setBlock(i + j, encdata->getBlock(j));
+        }
 
-        // Update IV for next block: IV = ciphertext[i]
-        // Copy encdata to IV (reuse encdata memory)
-        secure_memzero(IV, blockSize * sizeof(m_block));
-        memcpy(IV, encdata, blockSize * sizeof(m_block));
+        // Update prevBlock with current encrypted block for next iteration
+        for (size_t j = 0; j < blockSize; j++) {
+            prevBlock->setBlock(j, encdata->getBlock(j));
+        }
 
-        secure_memzero(encdata, blockSize * sizeof(m_block));
-        free(encdata);
+        delete encdata;
     }
 
-    secure_memzero(data2process, cipherLen * sizeof(m_block));
-    free(data2process);
+    delete paddedPlain;
+    delete prevBlock;
 
-    // Update the caller's IV with the final state
-    update_iv(iv, IV, blockSize);
-
-    auto OES_block = static_cast<OES_BLOCK>(malloc(sizeof(oesblock)));
-    if (!OES_block) {
-        secure_memzero(cipher, cipherLen * sizeof(m_block));
-        free(cipher);
-        return nullptr;
+    // Update IV parameter with the last cipher block
+    if (iv) {
+        if (*iv) {
+            delete *iv;
+        }
+        // Store the last cipher block as the new IV
+        *iv = MBLOCK::create(blockSize, 0);
+        if (*iv) {
+            for (size_t j = 0; j < blockSize; j++) {
+                (*iv)->setBlock(j, cipher->getBlock(cipherLen - blockSize + j));
+            }
+        }
     }
 
-    OES_block->len = cipherLen;
-    OES_block->data = cipher;
-
-    return OES_block;
+    return cipher;
 }
 
-OES_BLOCK oes_dec_cbc(OES_BLOCK cipher, OES_KEY key, OES_BLOCK *iv) {
-    if (!cipher || !cipher->data || !key || !key->string) {
+MBLOCK *oes_dec_cbc(const MBLOCK *cipher, const MBLOCK *key, MBLOCK **iv) {
+    if (!cipher || cipher->isNull() || !key || key->isNull()) {
         return nullptr;
     }
 
-    size_t blockSize = MAX(key->len, OES_BLOCK_SIZE);
+    size_t cipherLen = cipher->getLen();
+    size_t keyLen = key->getLen();
+    size_t blockSize = MAX(keyLen, OES_NUM_OF_BLOCK);
 
-    auto plainData = static_cast<m_block *>(malloc(cipher->len * sizeof(m_block)));
-    if (!plainData) {
+    // Create plain MBLOCK
+    MBLOCK *plain = MBLOCK::create(cipherLen, 0);
+    if (!plain) {
         return nullptr;
     }
 
-    // Get a working copy of the IV
-    m_block *IV = get_iv_copy(iv, blockSize, m_block(0x455e69f3));
-    if (!IV) {
-        free(plainData);
+    // Keep a reference to the previous cipher block (starts with IV)
+    MBLOCK *prevBlock = get_or_create_iv(iv ? *iv : nullptr, blockSize, m_block(0x455e69f3));
+    if (!prevBlock) {
+        delete plain;
         return nullptr;
     }
 
-    for (size_t i = 0; i < cipher->len; i += blockSize) {
-        // Save ciphertext block before decryption (will become next IV)
-        m_block *cipherCopy = mBlock_clone(nullptr, &(cipher->data[i]), blockSize);
-        if (!cipherCopy) {
-            secure_memzero(plainData, i * sizeof(m_block));
-            free(plainData);
-            secure_memzero(IV, blockSize * sizeof(m_block));
-            free(IV);
+    for (size_t i = 0; i < cipherLen; i += blockSize) {
+        // Save current cipher block BEFORE decryption
+        MBLOCK *currentCipherBlock = MBLOCK::create(blockSize, 0);
+        if (!currentCipherBlock) {
+            delete plain;
+            delete prevBlock;
             return nullptr;
         }
 
-        // Decrypt the ciphertext block
-        m_block *decData = raw_dec(cipherCopy, blockSize, key->string);
-        if (!decData) {
-            secure_memzero(plainData, i * sizeof(m_block));
-            free(plainData);
-            secure_memzero(IV, blockSize * sizeof(m_block));
-            free(IV);
-            free(cipherCopy);
+        for (size_t j = 0; j < blockSize; j++) {
+            currentCipherBlock->setBlock(j, cipher->getBlock(i + j));
+        }
+
+        // Decrypt the cipher block
+        MBLOCK *decData = raw_dec(currentCipherBlock, key);
+        if (!decData || decData->isNull()) {
+            delete plain;
+            delete prevBlock;
+            delete currentCipherBlock;
             return nullptr;
         }
 
-        // CBC decryption: plaintext = decrypt(ciphertext) XOR IV
-        mBlock_xor(decData, IV, blockSize, true);
+        // XOR with previous cipher block (or IV for first block)
+        for (size_t j = 0; j < blockSize; j++) {
+            plain->setBlock(i + j, decData->getBlock(j) ^ prevBlock->getBlock(j));
+        }
 
-        // Copy result to plaintext buffer
-        memcpy(&(plainData[i]), decData, blockSize * sizeof(m_block));
+        delete decData;
 
-        // Free decrypted data
-        secure_memzero(decData, blockSize * sizeof(m_block));
-        free(decData);
+        // Update prevBlock with current cipher block for next iteration
+        for (size_t j = 0; j < blockSize; j++) {
+            prevBlock->setBlock(j, currentCipherBlock->getBlock(j));
+        }
 
-        // Update IV for next block: IV = ciphertext[i]
-        secure_memzero(IV, blockSize * sizeof(m_block));
-        memcpy(IV, cipherCopy, blockSize * sizeof(m_block));
-
-        free(cipherCopy);
+        delete currentCipherBlock;
     }
 
-    // Update the caller's IV with the final state
-    update_iv(iv, IV, blockSize);
+    delete prevBlock;
 
-    auto OES_block = static_cast<OES_BLOCK>(malloc(sizeof(oesblock)));
-    if (!OES_block) {
-        secure_memzero(plainData, cipher->len * sizeof(m_block));
-        free(plainData);
+    // Update IV parameter with the last cipher block
+    if (iv) {
+        if (*iv) {
+            delete *iv;
+        }
+        // Store the last cipher block as the new IV
+        *iv = MBLOCK::create(blockSize, 0);
+        if (*iv) {
+            for (size_t j = 0; j < blockSize; j++) {
+                (*iv)->setBlock(j, cipher->getBlock(cipherLen - blockSize + j));
+            }
+        }
+    }
+
+    // Remove padding
+    uint32_t padding = plain->get_padding_size_outer();
+    size_t outLen = cipherLen - padding;
+
+    // Create output with correct length
+    MBLOCK *result = MBLOCK::create(outLen, 0);
+    if (!result) {
+        delete plain;
         return nullptr;
     }
 
-    OES_block->len = cipher->len - mBlock_get_padding_einer(cipher->data, cipher->len, false, 0);
-    OES_block->data = plainData;
+    for (size_t i = 0; i < outLen; i++) {
+        result->setBlock(i, plain->getBlock(i));
+    }
 
-    return OES_block;
+    delete plain;
+    return result;
 }
 
 /**
  * Electronic CodeBook encryption
  */
-OES_BLOCK oes_enc_ecb(OES_BLOCK plain, OES_KEY key) {
-    if (!plain || !plain->data || !key || !key->string) {
+MBLOCK *oes_enc_ecb(const MBLOCK *plain, const MBLOCK *key) {
+    if (!plain || plain->isNull() || !key || key->isNull()) {
         return nullptr;
     }
 
-    size_t blockSize = MAX(key->len, OES_BLOCK_SIZE);
-    size_t cipherLen = closestMultiple(plain->len, blockSize);
+    size_t plainLen = plain->getLen();
+    size_t keyLen = key->getLen();
+    size_t blockSize = MAX(keyLen, OES_NUM_OF_BLOCK);
+    size_t cipherLen = closestMultiple(plainLen + 1, blockSize);
 
-    auto cipher = static_cast<m_block *>(malloc(cipherLen * sizeof(m_block)));
+    // Create padded version
+    MBLOCK *paddedPlain = plain->add_padding_outer(cipherLen, 0);
+    if (!paddedPlain) {
+        return nullptr;
+    }
+
+    // Create cipher MBLOCK
+    MBLOCK *cipher = MBLOCK::create(cipherLen, 0);
     if (!cipher) {
-        return nullptr;
-    }
-
-    auto *data2process = mBlock_padding_einer(plain->data, plain->len, cipherLen, 0);
-    if (!data2process) {
-        free(cipher);
+        delete paddedPlain;
         return nullptr;
     }
 
     for (size_t i = 0; i < cipherLen; i += blockSize) {
-        m_block *encdata = raw_enc(&data2process[i], blockSize, key->string);
-        if (!encdata) {
-            secure_memzero(cipher, i * sizeof(m_block));
-            free(cipher);
-            secure_memzero(data2process, cipherLen * sizeof(m_block));
-            free(data2process);
+        // Extract block as MBLOCK
+        MBLOCK *blockData = MBLOCK::create(blockSize, 0);
+        if (!blockData) {
+            delete cipher;
+            delete paddedPlain;
             return nullptr;
         }
 
-        memcpy(&(cipher[i]), encdata, blockSize * sizeof(m_block));
+        for (size_t j = 0; j < blockSize; j++) {
+            blockData->setBlock(j, paddedPlain->getBlock(i + j));
+        }
 
-        secure_memzero(encdata, blockSize * sizeof(m_block));
-        free(encdata);
+        MBLOCK *encdata = raw_enc(blockData, key);
+        delete blockData;
+
+        if (!encdata || encdata->isNull()) {
+            delete cipher;
+            delete paddedPlain;
+            if (encdata) delete encdata;
+            return nullptr;
+        }
+
+        for (size_t j = 0; j < blockSize; j++) {
+            cipher->setBlock(i + j, encdata->getBlock(j));
+        }
+
+        delete encdata;
     }
 
-    secure_memzero(data2process, cipherLen * sizeof(m_block));
-    free(data2process);
+    delete paddedPlain;
 
-    auto OES_block = static_cast<OES_BLOCK>(malloc(sizeof(oesblock)));
-    if (!OES_block) {
-        secure_memzero(cipher, cipherLen * sizeof(m_block));
-        free(cipher);
-        return nullptr;
-    }
-
-    OES_block->len = cipherLen;
-    OES_block->data = cipher;
-
-    return OES_block;
+    return cipher;
 }
 
-OES_BLOCK oes_dec_ecb(OES_BLOCK cipher, OES_KEY key) {
-    if (!cipher || !cipher->data || !key || !key->string) {
+MBLOCK *oes_dec_ecb(const MBLOCK *cipher, const MBLOCK *key) {
+    if (!cipher || cipher->isNull() || !key || key->isNull()) {
         return nullptr;
     }
 
-    size_t blockSize = MAX(key->len, OES_BLOCK_SIZE);
+    size_t cipherLen = cipher->getLen();
+    size_t keyLen = key->getLen();
+    size_t blockSize = MAX(keyLen, OES_NUM_OF_BLOCK);
 
-    auto plainData = static_cast<m_block *>(malloc(cipher->len * sizeof(m_block)));
-    if (!plainData) {
+    // Create plain MBLOCK
+    MBLOCK *plain = MBLOCK::create(cipherLen, 0);
+    if (!plain) {
         return nullptr;
     }
 
-    for (size_t i = 0; i < cipher->len; i += blockSize) {
-        m_block *decData = raw_dec(&(cipher->data[i]), blockSize, key->string);
-        if (!decData) {
-            secure_memzero(plainData, i * sizeof(m_block));
-            free(plainData);
+    for (size_t i = 0; i < cipherLen; i += blockSize) {
+        // Extract block as MBLOCK
+        MBLOCK *blockData = MBLOCK::create(blockSize, 0);
+        if (!blockData) {
+            delete plain;
             return nullptr;
         }
 
-        memcpy(&(plainData[i]), decData, blockSize * sizeof(m_block));
+        for (size_t j = 0; j < blockSize; j++) {
+            blockData->setBlock(j, cipher->getBlock(i + j));
+        }
 
-        secure_memzero(decData, blockSize * sizeof(m_block));
-        free(decData);
+        MBLOCK *decData = raw_dec(blockData, key);
+        delete blockData;
+
+        if (!decData || decData->isNull()) {
+            delete plain;
+            if (decData) delete decData;
+            return nullptr;
+        }
+
+        for (size_t j = 0; j < blockSize; j++) {
+            plain->setBlock(i + j, decData->getBlock(j));
+        }
+
+        delete decData;
     }
 
-    auto OES_block = static_cast<OES_BLOCK>(malloc(sizeof(oesblock)));
-    if (!OES_block) {
-        secure_memzero(plainData, cipher->len * sizeof(m_block));
-        free(plainData);
+    // Remove padding
+    uint32_t padding = plain->get_padding_size_outer();
+    size_t outLen = cipherLen - padding;
+
+    // Create output with correct length
+    MBLOCK *result = MBLOCK::create(outLen, 0);
+    if (!result) {
+        delete plain;
         return nullptr;
     }
 
-    OES_block->data = plainData;
-    OES_block->len = cipher->len - mBlock_get_padding_einer(cipher->data, cipher->len, false, 0);
+    for (size_t i = 0; i < outLen; i++) {
+        result->setBlock(i, plain->getBlock(i));
+    }
 
-    return OES_block;
+    delete plain;
+    return result;
 }

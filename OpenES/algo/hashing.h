@@ -3,9 +3,8 @@
 
 #include <OpenES/layer/raw-layer.h>
 
-m_block *oes_raw_hash(const m_block *data, size_t dataLen, size_t hashLen, OES_BLOCK *iv = nullptr);
+MBLOCK *oes_raw_hash(const MBLOCK *data, size_t hashLen, MBLOCK **iv);
 
-m_block *oes_raw_hmac(const m_block *key, size_t keyLen, const m_block *data, size_t dataLen, size_t hmacLen);
-
+MBLOCK *oes_raw_hmac(const MBLOCK *key, const MBLOCK *data, size_t hmacLen);
 
 #endif //LOCKBOX_HASHING_H

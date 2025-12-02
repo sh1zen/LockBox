@@ -947,11 +947,11 @@ std::pair<char *, size_t> iNode::encryptData(const char *data, size_t size) {
         return {copy, size};
     }
 
-    cipherEngine->load_data(const_cast<char *>(data), size)->enc_adv();
+    cipherEngine->load_data_raw(const_cast<char *>(data), size)->enc_adv();
 
-    size_t encSize = cipherEngine->get_cipherBlock()->len;
+    size_t encSize = cipherEngine->get_cipherBlock()->getLen();
     auto encrypted = static_cast<char *>(malloc(encSize));
-    memcpy(encrypted, cipherEngine->get_cipherBlock()->data, encSize);
+    memcpy(encrypted, cipherEngine->get_cipherBlock()->getData(), encSize);
 
     return {encrypted, encSize};
 }
@@ -963,11 +963,11 @@ std::pair<char *, size_t> iNode::decryptData(const char *data, size_t size) {
         return {copy, size};
     }
 
-    cipherEngine->load_data(const_cast<char *>(data), size)->dec_adv();
+    cipherEngine->load_data_raw(const_cast<char *>(data), size)->dec_adv();
 
-    size_t decSize = cipherEngine->get_cipherBlock()->len;
+    size_t decSize = cipherEngine->get_cipherBlock()->getLen();
     char *decrypted = (char *) malloc(decSize);
-    memcpy(decrypted, cipherEngine->get_cipherBlock()->data, decSize);
+    memcpy(decrypted, cipherEngine->get_cipherBlock()->getData(), decSize);
 
     return {decrypted, decSize};
 }

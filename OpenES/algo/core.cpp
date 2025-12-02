@@ -1,12 +1,10 @@
 #include <cstdlib>
-#include <cstring>
+#include <utility>
 
 #include <OpenES/layer/raw-layer.h>
 #include <OpenES/support/oesMath.h>
-#include "key_managment.h"
-#include "converter.h"
+#include "key_management.h"
 #include "core.h"
-
 #include "support.h"
 
 // ============================================================================
@@ -14,33 +12,33 @@
 // ============================================================================
 
 static m_block pseudoHadamardT(m_block block) {
-    m_block mask = (m_block(1) << OES_MID_BLOCK_SIZE) - 1;
-    m_block a = (block >> OES_MID_BLOCK_SIZE) & mask;
+    m_block mask = (m_block(1) << OES_HALF_BLOCK_SIZE) - 1;
+    m_block a = (block >> OES_HALF_BLOCK_SIZE) & mask;
     m_block b = block & mask;
 
     m_block a_new = (a + b) & mask;
-    m_block b_new = (a + b + b) & mask;  // a + 2b
+    m_block b_new = (a + b + b) & mask; // a + 2b
 
-    return (a_new << OES_MID_BLOCK_SIZE) | b_new;
+    return (a_new << OES_HALF_BLOCK_SIZE) | b_new;
 }
 
 static m_block pseudoHadamardTInv(m_block block) {
-    m_block mask = (m_block(1) << OES_MID_BLOCK_SIZE) - 1;
-    m_block a_new = (block >> OES_MID_BLOCK_SIZE) & mask;
+    m_block mask = (m_block(1) << OES_HALF_BLOCK_SIZE) - 1;
+    m_block a_new = (block >> OES_HALF_BLOCK_SIZE) & mask;
     m_block b_new = block & mask;
 
     // Inverse: a = 2*a_new - b_new, b = b_new - a_new
     m_block a = ((a_new << 1) - b_new) & mask;
     m_block b = (b_new - a_new) & mask;
 
-    return (a << OES_MID_BLOCK_SIZE) | b;
+    return (a << OES_HALF_BLOCK_SIZE) | b;
 }
 
 // ============================================================================
 // SIMPLE PRNG FOR DETERMINISTIC OPERATIONS
 // ============================================================================
 
-static inline m_block prng_next(m_block *state) {
+static m_block prng_next(m_block *state) {
     m_block x = *state;
 #if OES_MEM_SIZE <= 32
     x ^= x << 13;
@@ -51,7 +49,7 @@ static inline m_block prng_next(m_block *state) {
     x ^= x >> 7;
     x ^= x << 17;
 #endif
-    if (x == 0) x = 0x12345678;
+    if (x == 0) x = MASK_TO_BLOCK_SIZE(0x12345678, 0x12345678);;
     *state = x;
     return x;
 }
@@ -71,7 +69,7 @@ static inline m_block prng_next(m_block *state) {
 static inline m_block sbox_f(m_block x, m_block key) {
     // Non-linear operations that don't need to be invertible
     m_block t = x ^ key;
-    t = t * 0x9E3779B9;  // Multiplication by golden ratio constant
+    t = t * 0x9E3779B9; // Multiplication by golden ratio constant
     t ^= mBlock_rotr(t, 5);
     t += mBlock_rotl(x, 11);
     t ^= (t >> 7);
@@ -84,8 +82,8 @@ static inline m_block sbox_f(m_block x, m_block key) {
  * Feistel-based S-Box (4 rounds) - guaranteed bijective
  */
 static m_block feistel_sbox(m_block block, m_block key) {
-    m_block mask = (m_block(1) << OES_MID_BLOCK_SIZE) - 1;
-    m_block L = (block >> OES_MID_BLOCK_SIZE) & mask;
+    m_block mask = (m_block(1) << OES_HALF_BLOCK_SIZE) - 1;
+    m_block L = (block >> OES_HALF_BLOCK_SIZE) & mask;
     m_block R = block & mask;
 
     // 4 Feistel rounds
@@ -98,15 +96,15 @@ static m_block feistel_sbox(m_block block, m_block key) {
         k = prng_next(&k);
     }
 
-    return (L << OES_MID_BLOCK_SIZE) | R;
+    return (L << OES_HALF_BLOCK_SIZE) | R;
 }
 
 /**
  * Inverse Feistel S-Box - undo the 4 rounds in reverse
  */
 static m_block feistel_sbox_inv(m_block block, m_block key) {
-    m_block mask = (m_block(1) << OES_MID_BLOCK_SIZE) - 1;
-    m_block L = (block >> OES_MID_BLOCK_SIZE) & mask;
+    m_block mask = (m_block(1) << OES_HALF_BLOCK_SIZE) - 1;
+    m_block L = (block >> OES_HALF_BLOCK_SIZE) & mask;
     m_block R = block & mask;
 
     // Generate all round keys first
@@ -125,7 +123,7 @@ static m_block feistel_sbox_inv(m_block block, m_block key) {
         L = newL;
     }
 
-    return (L << OES_MID_BLOCK_SIZE) | R;
+    return (L << OES_HALF_BLOCK_SIZE) | R;
 }
 
 // ============================================================================
@@ -141,7 +139,9 @@ static void generate_permutation(size_t *perm, size_t len, m_block seed) {
     }
 
     m_block state = seed;
-    if (state == 0) state = 0x12345678;
+    if (state == 0) {
+        state =MASK_TO_BLOCK_SIZE(0x12345678, 0x12345678);
+    }
 
     for (size_t i = len - 1; i > 0; i--) {
         size_t j = prng_next(&state) % (i + 1);
@@ -176,7 +176,7 @@ static void apply_block_permutation(m_block *data, const size_t *perm, size_t le
 static m_block bit_permute(m_block block, m_block seed) {
     m_block result = 0;
     m_block state = seed;
-    if (state == 0) state = 0xDEADBEEF;
+    if (state == 0) state = MASK_TO_BLOCK_SIZE(0xDEADBEEF, 0xDEADBEEF);
 
     uint8_t perm[OES_MEM_SIZE];
     for (int i = 0; i < OES_MEM_SIZE; i++) {
@@ -205,7 +205,9 @@ static m_block bit_permute(m_block block, m_block seed) {
 static m_block bit_permute_inv(m_block block, m_block seed) {
     m_block result = 0;
     m_block state = seed;
-    if (state == 0) state = 0xDEADBEEF;
+    if (state == 0) {
+        state = MASK_TO_BLOCK_SIZE(0xDEADBEEF, 0xDEADBEEF);
+    }
 
     uint8_t perm[OES_MEM_SIZE];
     uint8_t inv[OES_MEM_SIZE];
@@ -245,7 +247,9 @@ static void mix_blocks(m_block *data, size_t len, m_block seed) {
     if (len < 2) return;
 
     m_block state = seed;
-    if (state == 0) state = 0xCAFEBABE;
+    if (state == 0) {
+        state = MASK_TO_BLOCK_SIZE(0xCAFEBABE, 0xCAFEBABE);
+    }
 
     // Forward pass: each block mixes with the next
     for (size_t i = 0; i < len - 1; i++) {
@@ -265,10 +269,12 @@ static void mix_blocks_inv(m_block *data, size_t len, m_block seed) {
     if (len < 2) return;
 
     m_block state = seed;
-    if (state == 0) state = 0xCAFEBABE;
+    if (state == 0) {
+        state = MASK_TO_BLOCK_SIZE(0xCAFEBABE, 0xCAFEBABE);
+    }
 
     // Pre-generate rotation amounts
-    m_block *rots = static_cast<m_block*>(malloc(len * sizeof(m_block)));
+    auto *rots = static_cast<m_block *>(malloc(len * sizeof(m_block)));
     if (!rots) return;
 
     for (size_t i = 0; i < len; i++) {
@@ -373,128 +379,168 @@ static void dec_round(m_block *data, size_t len, const m_block *round_key,
 // MAIN ENCRYPTION/DECRYPTION
 // ============================================================================
 
-m_block *raw_enc(const m_block *data, size_t dataLen, const m_block *key) {
-    if (!data || !key || dataLen == 0) {
+/**
+ * Raw encryption using MBLOCK
+ * @param data Input data MBLOCK
+ * @param key Key MBLOCK
+ * @return Encrypted MBLOCK* (caller must delete), or nullptr on error
+ */
+MBLOCK *raw_enc(const MBLOCK *data, const MBLOCK *key) {
+    if (!data || data->isNull() || !key || key->isNull()) {
         return nullptr;
     }
+
+    size_t dataLen = data->getLen();
 
     // Clone input data
-    m_block *cipher = mBlock_clone(nullptr, data, dataLen);
-    if (!cipher) {
-        return nullptr;
-    }
+    MBLOCK *cipher = data->clone();
 
     // Allocate working buffers
-    m_block *temp = static_cast<m_block*>(malloc(dataLen * sizeof(m_block)));
-    size_t *perm = static_cast<size_t*>(malloc(dataLen * sizeof(size_t)));
+    auto temp = new m_block[dataLen];
+    auto perm = new size_t[dataLen];
 
-    if (!temp || !perm) {
-        free(cipher);
-        if (temp) free(temp);
-        if (perm) free(perm);
+    // Expand key using MBLOCK
+    size_t exp_key_len = (OES_CORE_ROUNDS + 2) * dataLen;
+    MBLOCK *exp_key = key_expansion(key, exp_key_len, m_block(0x67452301), 5);
+
+    if (!exp_key || exp_key->isNull()) {
+        delete cipher;
+        delete[] temp;
+        delete[] perm;
+        if (exp_key) delete exp_key;
         return nullptr;
     }
 
-    // Expand key
-    size_t exp_key_len = (OES_CORE_ROUNDS + 2) * dataLen;
-    m_block *exp_key = key_expansion(key, dataLen, exp_key_len, m_block(0x67452301), 5);
-    if (!exp_key) {
-        free(cipher);
-        free(temp);
-        free(perm);
-        return nullptr;
+    // Extract cipher data for processing
+    auto cipherData = new m_block[dataLen];
+    for (size_t i = 0; i < dataLen; i++) {
+        cipherData[i] = cipher->getBlock(i);
     }
 
     // Initial whitening
     for (size_t i = 0; i < dataLen; i++) {
-        cipher[i] ^= exp_key[i];
+        cipherData[i] ^= exp_key->getBlock(i);
     }
 
     // Main rounds
     for (int r = 0; r < OES_CORE_ROUNDS; r++) {
-        const m_block *round_key = &exp_key[(r + 1) * dataLen];
-        enc_round(cipher, dataLen, round_key, perm, temp, r);
+        // Extract round key
+        auto round_key = new m_block[dataLen];
+        for (size_t i = 0; i < dataLen; i++) {
+            round_key[i] = exp_key->getBlock((r + 1) * dataLen + i);
+        }
+
+        enc_round(cipherData, dataLen, round_key, perm, temp, r);
+
+        secure_memzero(round_key, dataLen * sizeof(m_block));
+        delete[] round_key;
     }
 
     // Final whitening
     for (size_t i = 0; i < dataLen; i++) {
-        cipher[i] ^= exp_key[(OES_CORE_ROUNDS + 1) * dataLen + i];
+        cipherData[i] ^= exp_key->getBlock((OES_CORE_ROUNDS + 1) * dataLen + i);
+    }
+
+    // Update cipher MBLOCK with encrypted data
+    for (size_t i = 0; i < dataLen; i++) {
+        cipher->setBlock(i, cipherData[i]);
     }
 
     // Cleanup
-    secure_memzero(exp_key, exp_key_len * sizeof(m_block));
-    free(exp_key);
-    free(temp);
-    free(perm);
+    exp_key->secure_zero();
+    delete exp_key;
+    secure_memzero(cipherData, dataLen * sizeof(m_block));
+    delete[] cipherData;
+    delete[] temp;
+    delete[] perm;
 
     return cipher;
 }
 
-m_block *raw_dec(const m_block *data, size_t dataLen, const m_block *key) {
-    if (!data || !key || dataLen == 0) {
+/**
+ * Raw decryption using MBLOCK
+ * @param data Input ciphertext MBLOCK
+ * @param key Key MBLOCK
+ * @return Decrypted MBLOCK* (caller must delete), or nullptr on error
+ */
+MBLOCK *raw_dec(const MBLOCK *data, const MBLOCK *key) {
+    if (!data || data->isNull() || !key || key->isNull()) {
         return nullptr;
     }
+
+    size_t dataLen = data->getLen();
 
     // Clone input data
-    m_block *plain = mBlock_clone(nullptr, data, dataLen);
-    if (!plain) {
-        return nullptr;
-    }
+    MBLOCK *plain = data->clone();
 
     // Allocate working buffers
-    m_block *temp = static_cast<m_block*>(malloc(dataLen * sizeof(m_block)));
-    size_t *perm = static_cast<size_t*>(malloc(dataLen * sizeof(size_t)));
-    size_t *inv_perm = static_cast<size_t*>(malloc(dataLen * sizeof(size_t)));
+    auto temp = new m_block[dataLen];
+    auto perm = new size_t[dataLen];
+    auto inv_perm = new size_t[dataLen];
 
-    if (!temp || !perm || !inv_perm) {
-        free(plain);
-        if (temp) free(temp);
-        if (perm) free(perm);
-        if (inv_perm) free(inv_perm);
+    // Expand key using MBLOCK (same as encryption)
+    size_t exp_key_len = (OES_CORE_ROUNDS + 2) * dataLen;
+    MBLOCK *exp_key = key_expansion(key, exp_key_len, m_block(0x67452301), 5);
+
+    if (!exp_key || exp_key->isNull()) {
+        delete plain;
+        delete[] temp;
+        delete[] perm;
+        delete[] inv_perm;
+        if (exp_key) delete exp_key;
         return nullptr;
     }
 
-    // Expand key (same as encryption)
-    size_t exp_key_len = (OES_CORE_ROUNDS + 2) * dataLen;
-    m_block *exp_key = key_expansion(key, dataLen, exp_key_len, m_block(0x67452301), 5);
-    if (!exp_key) {
-        free(plain);
-        free(temp);
-        free(perm);
-        free(inv_perm);
-        return nullptr;
+    // Extract plain data for processing
+    auto plainData = new m_block[dataLen];
+    for (size_t i = 0; i < dataLen; i++) {
+        plainData[i] = plain->getBlock(i);
     }
 
     // Remove final whitening
     for (size_t i = 0; i < dataLen; i++) {
-        plain[i] ^= exp_key[(OES_CORE_ROUNDS + 1) * dataLen + i];
+        plainData[i] ^= exp_key->getBlock((OES_CORE_ROUNDS + 1) * dataLen + i);
     }
 
     // Inverse rounds (reverse order)
     for (int r = OES_CORE_ROUNDS - 1; r >= 0; r--) {
-        const m_block *round_key = &exp_key[(r + 1) * dataLen];
-        dec_round(plain, dataLen, round_key, perm, inv_perm, temp, r);
+        // Extract round key
+        auto round_key = new m_block[dataLen];
+        for (size_t i = 0; i < dataLen; i++) {
+            round_key[i] = exp_key->getBlock((r + 1) * dataLen + i);
+        }
+
+        dec_round(plainData, dataLen, round_key, perm, inv_perm, temp, r);
+
+        secure_memzero(round_key, dataLen * sizeof(m_block));
+        delete[] round_key;
     }
 
     // Remove initial whitening
     for (size_t i = 0; i < dataLen; i++) {
-        plain[i] ^= exp_key[i];
+        plainData[i] ^= exp_key->getBlock(i);
+    }
+
+    // Update plain MBLOCK with decrypted data
+    for (size_t i = 0; i < dataLen; i++) {
+        plain->setBlock(i, plainData[i]);
     }
 
     // Cleanup
-    secure_memzero(exp_key, exp_key_len * sizeof(m_block));
-    free(exp_key);
-    free(temp);
-    free(perm);
-    free(inv_perm);
+    exp_key->secure_zero();
+    delete exp_key;
+    secure_memzero(plainData, dataLen * sizeof(m_block));
+    delete[] plainData;
+    delete[] temp;
+    delete[] perm;
+    delete[] inv_perm;
 
     return plain;
 }
 
 // ============================================================================
-// DATA CORRELATION (preserved from original)
+// DATA CORRELATION
 // ============================================================================
-
 
 /**
  * Implement some data diffusion
@@ -503,23 +549,32 @@ m_block *raw_dec(const m_block *data, size_t dataLen, const m_block *key) {
  * - 1 F(F(0)) ^ 2
  * - 2 F(F(F(0))) ^ F(0) ^ 1
  */
-void correlate_data(m_block *data, size_t dataLen, m_block seed) {
-    if (!data || dataLen == 0) return;
+void correlate_data(MBLOCK *data, m_block seed) {
+    if (!data || data->isNull()) return;
+
+    size_t dataLen = data->getLen();
+    if (dataLen == 0) return;
 
     m_block k;
     xTimeMBlock(&seed);
 
     for (size_t i = 0; i < dataLen; i++) {
-        k = mBlock_rotl(data[i] ^ seed, 3);
+        m_block currentBlock = data->getBlock(i);
+        m_block nextBlock = data->getBlock((i + 1) % dataLen);
+
+        k = mBlock_rotl(currentBlock ^ seed, 3);
         k = pseudoHadamardT(k);
 
-        data[i] = k ^ data[(i + 1) % dataLen];
-        data[(i + 1) % dataLen] = k;
+        data->setBlock(i, k ^ nextBlock);
+        data->setBlock((i + 1) % dataLen, k);
     }
 }
 
-void uncorrelate_data(m_block *data, size_t dataLen, m_block seed) {
-    if (!data || dataLen == 0) return;
+void uncorrelate_data(MBLOCK *data, m_block seed) {
+    if (!data || data->isNull()) return;
+
+    size_t dataLen = data->getLen();
+    if (dataLen == 0) return;
 
     m_block k;
     xTimeMBlock(&seed);
@@ -527,8 +582,11 @@ void uncorrelate_data(m_block *data, size_t dataLen, m_block seed) {
     for (size_t j, i = dataLen; i >= 1; i--) {
         j = i - 1;
 
-        k = pseudoHadamardTInv(data[(j + 1) % dataLen]);
-        data[(j + 1) % dataLen] ^= data[j];
-        data[j] = mBlock_rotr(k, 3) ^ seed;
+        m_block nextBlock = data->getBlock((j + 1) % dataLen);
+        m_block currentBlock = data->getBlock(j);
+
+        k = pseudoHadamardTInv(nextBlock);
+        data->setBlock((j + 1) % dataLen, nextBlock ^ currentBlock);
+        data->setBlock(j, mBlock_rotr(k, 3) ^ seed);
     }
 }

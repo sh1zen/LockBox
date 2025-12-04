@@ -1,0 +1,527 @@
+import React, { useState, useMemo } from 'react';
+
+ ROT3D = [
+  [[52, 9, 51, 6], [33, 2, 13, 53], [47, 50, 49, 7], [18, 48, 35, 14]],
+  [[4, 21, 3, 62], [41, 38, 32, 46], [42, 57, 25, 30], [45, 39, 11, 44]],
+  [[43, 55, 23, 26], [10, 40, 54, 5], [61, 56, 60, 0], [15, 16, 1, 34]],
+  [[36, 63, 19, 59], [17, 29, 12, 22], [31, 20, 24, 37], [28, 27, 58, 8]]
+];
+
+ PI3D = [
+ 0x02, 0x03, 0x23, 0x3C, 0x33, 0x29, 0x1D, 0x2E,
+    0x3B, 0x27, 0x36, 0x1E, 0x2C, 0x2A, 0x14, 0x1B,
+    0x3F, 0x34, 0x31, 0x25, 0x18, 0x21, 0x0C, 0x1A,
+    0x15, 0x0D, 0x16, 0x20, 0x09, 0x37, 0x2F, 0x04,
+    0x3D, 0x00, 0x19, 0x17, 0x3A, 0x0B, 0x30, 0x11,
+    0x0F, 0x2D, 0x32, 0x07, 0x05, 0x1C, 0x0E, 0x2B,
+    0x28, 0x06, 0x24, 0x10, 0x08, 0x1F, 0x13, 0x3E,
+    0x26, 0x0A, 0x39, 0x38, 0x35, 0x12, 0x01, 0x22
+];
+
+const getRotValue = (i) => ROT3D[i >> 4][(i >> 2) & 3][i & 3];
+
+const simulatePiRho = (state) => {
+  const tmp = new Array(64).fill(0n);
+  for (let i = 0; i < 64; i++) {
+    const r = getRotValue(i);
+    const val = state[i];
+    const rotated = r === 0 ? val : ((val << BigInt(r)) | (val >> BigInt(64 - r))) & 0xFFFFFFFFFFFFFFFFn;
+    tmp[PI3D[i]] = rotated;
+  }
+  return tmp;
+};
+
+const PI3D_INV = (() => {
+  const inv = new Array(64);
+  for (let i = 0; i < 64; i++) inv[PI3D[i]] = i;
+  return inv;
+})();
+
+const getCycles = () => {
+  const visited = new Array(64).fill(false);
+  const cycles = [];
+  for (let start = 0; start < 64; start++) {
+    if (visited[start]) continue;
+    const cycle = [];
+    let i = start;
+    while (!visited[i]) { visited[i] = true; cycle.push(i); i = PI3D[i]; }
+    cycles.push(cycle);
+  }
+  return cycles;
+};
+
+const getTransitionMatrixMultiRound = (rounds) => {
+  const finalDest = new Array(64);
+  for (let i = 0; i < 64; i++) {
+    let pos = i;
+    for (let r = 0; r < rounds; r++) pos = PI3D[pos];
+    finalDest[i] = pos;
+  }
+  const rowMatrix = Array(8).fill(null).map(() => Array(8).fill(0));
+  const colMatrix = Array(8).fill(null).map(() => Array(8).fill(0));
+  for (let i = 0; i < 64; i++) {
+    rowMatrix[Math.floor(i / 8)][Math.floor(finalDest[i] / 8)]++;
+    colMatrix[i % 8][finalDest[i] % 8]++;
+  }
+  return { rowMatrix, colMatrix };
+};
+
+const testDiffusionFrom = (startPos, rounds) => {
+  const results = [];
+  for (let r = 1; r <= rounds; r++) {
+    const s0 = new Array(64).fill(0n); s0[startPos] = 1n;
+    const s1 = new Array(64).fill(0n); s1[startPos] = 2n;
+    let a = s0, b = s1;
+    for (let i = 0; i < r; i++) { a = simulatePiRho(a); b = simulatePiRho(b); }
+    const affected = [];
+    let bits = 0;
+    for (let i = 0; i < 64; i++) {
+      const diff = a[i] ^ b[i];
+      if (diff !== 0n) {
+        affected.push(i);
+        let d = diff; while (d > 0n) { bits += Number(d & 1n); d >>= 1n; }
+      }
+    }
+    results.push({ round: r, positions: affected.length, bits, affected });
+  }
+  return results;
+};
+
+const testDiffusionFromMultiple = (maxStartPos, rounds) => {
+  const allAffected = Array(rounds).fill(null).map(() => new Map());
+  for (let start = 0; start <= maxStartPos; start++) {
+    for (let r = 1; r <= rounds; r++) {
+      const s0 = new Array(64).fill(0n); s0[start] = 1n;
+      const s1 = new Array(64).fill(0n); s1[start] = 2n;
+      let a = s0, b = s1;
+      for (let i = 0; i < r; i++) { a = simulatePiRho(a); b = simulatePiRho(b); }
+      for (let i = 0; i < 64; i++) {
+        if ((a[i] ^ b[i]) !== 0n) {
+          const map = allAffected[r - 1];
+          map.set(i, (map.get(i) || 0) + 1);
+        }
+      }
+    }
+  }
+  return allAffected.map((map, idx) => ({
+    round: idx + 1,
+    affected: Array.from(map.entries()).map(([pos, count]) => ({ pos, count })),
+    positions: map.size,
+    totalHits: Array.from(map.values()).reduce((a, b) => a + b, 0)
+  }));
+};
+
+const testFullAvalanche = (rounds) => {
+  const avgByRound = [];
+  for (let r = 1; r <= rounds; r++) {
+    let totalPos = 0, totalBits = 0;
+    for (let start = 0; start < 64; start++) {
+      const diff = testDiffusionFrom(start, r);
+      totalPos += diff[r - 1].positions;
+      totalBits += diff[r - 1].bits;
+    }
+    avgByRound.push({ round: r, avgPositions: (totalPos / 64).toFixed(1), avgBits: (totalBits / 64).toFixed(1), coverage: ((totalPos / 64 / 64) * 100).toFixed(1) });
+  }
+  return avgByRound;
+};
+
+const evaluateQuality = (diffusionMulti, rowMatrix, colMatrix, cycles, maxRounds) => {
+  const scores = [];
+  let totalScore = 0;
+
+  const fullCoverageRound = diffusionMulti.findIndex(d => d.positions === 64) + 1;
+  const coverageScore = fullCoverageRound === 0 ? 0 : Math.max(0, 100 - (fullCoverageRound - 1) * 20);
+  scores.push({ name: 'Full Coverage Speed', value: fullCoverageRound > 0 ? `R${fullCoverageRound}` : `Never`, score: coverageScore, max: 100, good: fullCoverageRound <= 2, ideal: 'R1 (64/64 al primo round)', desc: 'Quanti round servono per colpire tutte le 64 posizioni. Ideale: raggiungere 64/64 al round 1.' });
+  totalScore += coverageScore;
+
+  const r1Coverage = diffusionMulti[0]?.positions || 0;
+  const r1Score = Math.round((r1Coverage / 64) * 100);
+  scores.push({ name: 'R1 Coverage', value: `${r1Coverage}/64`, score: r1Score, max: 100, good: r1Coverage >= 48, ideal: '64/64 (100%)', desc: 'Posizioni colpite dopo 1 solo round. Ideale: tutte le 64 posizioni (100%).' });
+  totalScore += r1Score;
+
+  const hitsPerPos = diffusionMulti[diffusionMulti.length - 1]?.affected.map(a => a.count) || [];
+  const avgHits = hitsPerPos.length > 0 ? hitsPerPos.reduce((a, b) => a + b, 0) / hitsPerPos.length : 0;
+  const variance = hitsPerPos.length > 0 ? hitsPerPos.reduce((s, h) => s + Math.pow(h - avgHits, 2), 0) / hitsPerPos.length : 0;
+  const stdDev = Math.sqrt(variance);
+  const uniformityScore = Math.max(0, Math.round(100 - stdDev * 2));
+  scores.push({ name: 'Hit Uniformity', value: `σ=${stdDev.toFixed(1)}`, score: uniformityScore, max: 100, good: stdDev < 10, ideal: 'σ=0 (tutti uguali)', desc: 'Deviazione standard degli hit per posizione. Ideale: σ=0, tutti i punti colpiti lo stesso numero di volte.' });
+  totalScore += uniformityScore;
+
+  const rowZeros = rowMatrix.flat().filter(v => v === 0).length;
+  const rowScore = Math.round((1 - rowZeros / 64) * 100);
+  scores.push({ name: 'Row Connectivity', value: `${64 - rowZeros}/64`, score: rowScore, max: 100, good: rowZeros === 0, ideal: '64/64 (nessuno 0)', desc: 'Celle non-zero nella matrice Row Trans. Ideale: tutte 64 celle con valore ≥1, nessuno 0.' });
+  totalScore += rowScore;
+
+  const colZeros = colMatrix.flat().filter(v => v === 0).length;
+  const colScore = Math.round((1 - colZeros / 64) * 100);
+  scores.push({ name: 'Col Connectivity', value: `${64 - colZeros}/64`, score: colScore, max: 100, good: colZeros === 0, ideal: '64/64 (nessuno 0)', desc: 'Celle non-zero nella matrice Col Trans. Ideale: tutte 64 celle con valore ≥1, nessuno 0.' });
+  totalScore += colScore;
+
+  const fixedPoints = cycles.filter(c => c.length === 1).length;
+  const fixedScore = fixedPoints === 0 ? 100 : Math.max(0, 100 - fixedPoints * 25);
+  scores.push({ name: 'No Fixed Points', value: fixedPoints === 0 ? '✓' : `${fixedPoints}`, score: fixedScore, max: 100, good: fixedPoints === 0, ideal: '0 (nessun punto fisso)', desc: 'Posizioni dove PI3D[i]=i. Ideale: zero punti fissi, ogni posizione deve spostarsi.' });
+  totalScore += fixedScore;
+
+  const longestCycle = Math.max(...cycles.map(c => c.length));
+  const cycleScore = Math.round((longestCycle / 64) * 100);
+  scores.push({ name: 'Cycle Length', value: `${longestCycle}/64`, score: cycleScore, max: 100, good: longestCycle >= 32, ideal: '64 (un solo ciclo)', desc: 'Lunghezza del ciclo più lungo. Ideale: 64 (tutta la permutazione è un unico ciclo).' });
+  totalScore += cycleScore;
+
+  const rotVals = ROT3D.flat(2);
+  const rotZeros = rotVals.filter(v => v === 0).length;
+  const rotScore = rotZeros === 0 ? 100 : Math.max(0, 100 - rotZeros * 20);
+  scores.push({ name: 'ROT3D No Zeros', value: rotZeros === 0 ? '✓' : `${rotZeros}`, score: rotScore, max: 100, good: rotZeros === 0, ideal: '0 zeri (tutte rotazioni >0)', desc: 'Rotazioni con valore 0 non mescolano i bit. Ideale: nessuna rotazione a 0.' });
+  totalScore += rotScore;
+
+  const maxTotal = scores.length * 100;
+  const grade = totalScore >= maxTotal * 0.9 ? 'A' : totalScore >= maxTotal * 0.8 ? 'B' : totalScore >= maxTotal * 0.7 ? 'C' : totalScore >= maxTotal * 0.6 ? 'D' : 'F';
+  return { scores, totalScore, maxTotal, grade };
+};
+
+const InfoTooltip = ({ text, ideal }) => {
+  const [show, setShow] = useState(false);
+  return (
+    <span className="relative inline-block">
+      <button onClick={() => setShow(!show)} className="w-4 h-4 rounded-full bg-blue-500 text-white text-[8px] font-bold ml-1 hover:bg-blue-600">?</button>
+      {show && (
+        <div className="absolute z-10 left-5 top-0 w-56 bg-gray-900 text-white text-[9px] p-2 rounded shadow-lg">
+          <div className="mb-1">{text}</div>
+          <div className="text-green-400 font-bold">Ideale: {ideal}</div>
+          <button onClick={() => setShow(false)} className="absolute top-1 right-1 text-gray-400 hover:text-white">✕</button>
+        </div>
+      )}
+    </span>
+  );
+};
+
+const QualityPanel = ({ diffusionMulti, rowMatrix, colMatrix, cycles, maxRounds }) => {
+  const { scores, totalScore, maxTotal, grade } = evaluateQuality(diffusionMulti, rowMatrix, colMatrix, cycles, maxRounds);
+  const gradeColor = { A: 'bg-green-500', B: 'bg-green-400', C: 'bg-yellow-400', D: 'bg-orange-400', F: 'bg-red-500' };
+  return (
+    <div className="bg-white border-2 border-gray-300 rounded p-2">
+      <div className="flex items-center gap-3 mb-2">
+        <div className={`${gradeColor[grade]} text-white text-2xl font-bold w-12 h-12 flex items-center justify-center rounded`}>{grade}</div>
+        <div>
+          <div className="font-bold text-sm">Quality Score</div>
+          <div className="text-xs text-gray-600">{totalScore}/{maxTotal} ({Math.round(totalScore / maxTotal * 100)}%)</div>
+        </div>
+      </div>
+      <div className="space-y-1">
+        {scores.map((s, i) => (
+          <div key={i} className="flex items-center gap-2 text-[10px]">
+            <div className={`w-3 h-3 rounded-full ${s.good ? 'bg-green-500' : 'bg-red-400'}`} />
+            <div className="w-28 font-medium flex items-center">{s.name}<InfoTooltip text={s.desc} ideal={s.ideal} /></div>
+            <div className="w-16 text-gray-600">{s.value}</div>
+            <div className="flex-1 bg-gray-200 rounded h-2">
+              <div className={`h-2 rounded ${s.score >= 80 ? 'bg-green-500' : s.score >= 50 ? 'bg-yellow-400' : 'bg-red-400'}`} style={{ width: `${s.score}%` }} />
+            </div>
+            <div className="w-6 text-right">{s.score}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+const MatrixInfo = ({ type }) => {
+  const [show, setShow] = useState(false);
+  const info = {
+    row: {
+      title: 'Row Transitions',
+      desc: 'Mostra quanti elementi da ogni riga sorgente vanno a ogni riga destinazione dopo N round di PI3D.',
+      ideal: 'Tutti 1 (distribuzione perfetta)',
+      bad: '0 = nessun percorso diretto, 2+ = concentrazione',
+      diag: 'Diagonale = elementi che restano nella stessa riga (meno mixing)'
+    },
+    col: {
+      title: 'Col Transitions', 
+      desc: 'Mostra quanti elementi da ogni colonna sorgente vanno a ogni colonna destinazione dopo N round di PI3D.',
+      ideal: 'Tutti 1 (distribuzione perfetta)',
+      bad: '0 = nessun percorso diretto, 2+ = concentrazione',
+      diag: 'Diagonale = elementi che restano nella stessa colonna (meno mixing)'
+    },
+    pi: {
+      title: 'PI3D[i]',
+      desc: 'Permutazione: la posizione i va alla posizione PI3D[i].',
+      ideal: 'Nessun punto fisso (PI3D[i]≠i), ciclo unico di 64',
+      bad: 'Rosso = resta nella stessa riga (poca diffusione)',
+      diag: 'Ogni valore 0-63 deve apparire esattamente una volta'
+    },
+    rot: {
+      title: 'ROT3D',
+      desc: 'Rotazione applicata a ogni posizione. rot = ROT3D[i>>4][(i>>2)&3][i&3]',
+      ideal: 'Tutti valori 1-63, nessuno 0, tutti unici',
+      bad: 'Rosso = rotazione 0 (nessun mixing dei bit)',
+      diag: 'Distribuzione uniforme su range 1-63'
+    }
+  };
+  const i = info[type];
+  return (
+    <span className="relative inline-block">
+      <button onClick={() => setShow(!show)} className="w-4 h-4 rounded-full bg-blue-500 text-white text-[8px] font-bold ml-1 hover:bg-blue-600">?</button>
+      {show && (
+        <div className="absolute z-20 left-5 top-0 w-64 bg-gray-900 text-white text-[9px] p-2 rounded shadow-lg">
+          <div className="font-bold text-green-400 mb-1">{i.title}</div>
+          <div className="mb-1">{i.desc}</div>
+          <div className="text-green-400">✓ Ideale: {i.ideal}</div>
+          <div className="text-red-400">✗ Problema: {i.bad}</div>
+          <div className="text-yellow-400">◐ Note: {i.diag}</div>
+          <button onClick={() => setShow(false)} className="absolute top-1 right-1 text-gray-400 hover:text-white">✕</button>
+        </div>
+      )}
+    </span>
+  );
+};
+
+const Grid8x8 = ({ getData, getColor, title, infoType }) => (
+  <div className="inline-block mr-4 mb-2">
+    <div className="text-xs font-bold mb-1">{title}{infoType && <MatrixInfo type={infoType} />}</div>
+    {[0, 1, 2, 3, 4, 5, 6, 7].map(y => (
+      <div key={y} className="flex">
+        {[0, 1, 2, 3, 4, 5, 6, 7].map(x => {
+          const i = y * 8 + x;
+          const val = getData(i);
+          const color = getColor ? getColor(i, val) : 'bg-blue-100';
+          return <div key={x} className={`w-6 h-6 text-[9px] flex items-center justify-center border border-gray-300 ${color}`} title={`i=${i} val=${val}`}>{val}</div>;
+        })}
+      </div>
+    ))}
+  </div>
+);
+
+const Matrix8x8 = ({ data, title, infoType }) => (
+  <div className="inline-block mr-4 mb-2">
+    <div className="text-xs font-bold mb-1">{title}{infoType && <MatrixInfo type={infoType} />}</div>
+    {data.map((row, y) => (
+      <div key={y} className="flex">
+        {row.map((v, x) => (
+          <div key={x} className={`w-6 h-6 text-[9px] flex items-center justify-center border ${v === 0 ? 'bg-red-300' : v === 1 ? 'bg-green-300' : 'bg-yellow-200'} ${y === x ? 'border-2 border-blue-600' : 'border-gray-300'}`}>{v}</div>
+        ))}
+      </div>
+    ))}
+  </div>
+);
+
+const CumulativeSingleVis = ({ diffusionResults, maxRounds }) => {
+  const hitCount = new Array(64).fill(0);
+  diffusionResults.forEach(d => d.affected.forEach(pos => hitCount[pos]++));
+  const positionsEverHit = hitCount.filter(c => c > 0).length;
+  return (
+    <div className="inline-block mr-4 mb-2">
+      <div className="text-[10px] font-bold mb-1">→ {positionsEverHit}/64 hit</div>
+      {[0, 1, 2, 3, 4, 5, 6, 7].map(y => (
+        <div key={y} className="flex">
+          {[0, 1, 2, 3, 4, 5, 6, 7].map(x => {
+            const i = y * 8 + x;
+            const count = hitCount[i];
+            let bg = 'bg-gray-100';
+            if (count > 0) {
+              if (count >= maxRounds * 0.8) bg = 'bg-red-600 text-white';
+              else if (count >= maxRounds * 0.5) bg = 'bg-red-400';
+              else if (count >= maxRounds * 0.3) bg = 'bg-orange-300';
+              else bg = 'bg-yellow-200';
+            }
+            return <div key={x} className={`w-6 h-6 text-[8px] border border-gray-400 flex items-center justify-center ${bg}`}>{count > 0 ? count : ''}</div>;
+          })}
+        </div>
+      ))}
+    </div>
+  );
+};
+
+const CumulativeMultiVis = ({ diffusionResults, maxStartPos }) => {
+  const hitCount = new Array(64).fill(0);
+  diffusionResults.forEach(d => d.affected.forEach(({ pos, count }) => hitCount[pos] += count));
+  const positionsEverHit = hitCount.filter(c => c > 0).length;
+  const maxHits = Math.max(...hitCount);
+  return (
+    <div className="inline-block mr-4 mb-2">
+      <div className="text-[10px] font-bold mb-1">→ {positionsEverHit}/64 hit</div>
+      {[0, 1, 2, 3, 4, 5, 6, 7].map(y => (
+        <div key={y} className="flex">
+          {[0, 1, 2, 3, 4, 5, 6, 7].map(x => {
+            const i = y * 8 + x;
+            const count = hitCount[i];
+            const intensity = maxHits > 0 ? count / maxHits : 0;
+            let bg = 'bg-gray-100';
+            if (count > 0) {
+              if (intensity >= 0.8) bg = 'bg-red-600 text-white';
+              else if (intensity >= 0.6) bg = 'bg-red-500 text-white';
+              else if (intensity >= 0.4) bg = 'bg-orange-400';
+              else bg = 'bg-yellow-200';
+            }
+            return <div key={x} className={`w-7 h-7 text-[8px] border border-gray-400 flex items-center justify-center ${bg}`}>{count > 0 ? count : ''}</div>;
+          })}
+        </div>
+      ))}
+    </div>
+  );
+};
+
+const StateVisSingle = ({ affected, round }) => (
+  <div className="inline-block mr-2 mb-2">
+    <div className="text-[9px] text-center font-bold">R{round}: {affected.length}/64</div>
+    {[0, 1, 2, 3, 4, 5, 6, 7].map(y => (
+      <div key={y} className="flex">
+        {[0, 1, 2, 3, 4, 5, 6, 7].map(x => {
+          const i = y * 8 + x;
+          return <div key={x} className={`w-4 h-4 border border-gray-400 ${affected.includes(i) ? 'bg-red-500' : 'bg-gray-100'}`} />;
+        })}
+      </div>
+    ))}
+  </div>
+);
+
+const StateVisMulti = ({ affected, round, maxStartPos }) => {
+  const maxCount = Math.max(...affected.map(a => a.count), 1);
+  const countMap = new Map();
+  affected.forEach(({ pos, count }) => countMap.set(pos, count));
+  return (
+    <div className="inline-block mr-2 mb-2">
+      <div className="text-[9px] text-center font-bold">R{round}: {affected.length}/64</div>
+      {[0, 1, 2, 3, 4, 5, 6, 7].map(y => (
+        <div key={y} className="flex">
+          {[0, 1, 2, 3, 4, 5, 6, 7].map(x => {
+            const i = y * 8 + x;
+            const count = countMap.get(i) || 0;
+            const intensity = count / maxCount;
+            let bg = 'bg-gray-100';
+            if (count > 0) {
+              if (intensity >= 0.8) bg = 'bg-red-600 text-white';
+              else if (intensity >= 0.5) bg = 'bg-red-400';
+              else bg = 'bg-yellow-200';
+            }
+            return <div key={x} className={`w-5 h-5 text-[7px] border border-gray-400 flex items-center justify-center ${bg}`}>{count > 0 ? count : ''}</div>;
+          })}
+        </div>
+      ))}
+    </div>
+  );
+};
+
+const Planes4x4 = ({ title }) => (
+  <div className="mb-4">
+    <div className="text-xs font-bold mb-1">{title}</div>
+    <div className="flex gap-2">
+      {ROT3D.map((plane, z) => (
+        <div key={z} className="text-[8px]">
+          <div className="text-center font-bold mb-1">Plane {z}</div>
+          {plane.map((row, y) => (
+            <div key={y} className="flex">
+              {row.map((v, x) => (
+                <div key={x} className={`w-6 h-5 border text-center flex items-center justify-center ${v === 0 ? 'bg-red-300' : v < 16 ? 'bg-yellow-100' : v < 32 ? 'bg-green-100' : v < 48 ? 'bg-blue-100' : 'bg-purple-100'}`}>{v}</div>
+              ))}
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  </div>
+);
+
+export default function App() {
+  const [startPos, setStartPos] = useState(63);
+  const [maxRounds, setMaxRounds] = useState(8);
+
+  const cycles = useMemo(() => getCycles(), []);
+  const { rowMatrix, colMatrix } = useMemo(() => getTransitionMatrixMultiRound(maxRounds), [maxRounds]);
+  const diffusionSingle = useMemo(() => testDiffusionFrom(startPos, maxRounds), [startPos, maxRounds]);
+  const diffusionMulti = useMemo(() => testDiffusionFromMultiple(startPos, maxRounds), [startPos, maxRounds]);
+  const avalanche = useMemo(() => testFullAvalanche(Math.min(maxRounds, 6)), [maxRounds]);
+
+  const rotStats = useMemo(() => {
+    const vals = ROT3D.flat(2);
+    return { unique: new Set(vals).size, zeros: vals.filter(v => v === 0).length, avg: (vals.reduce((a, b) => a + b, 0) / 64).toFixed(1) };
+  }, []);
+
+  const piStats = useMemo(() => ({ unique: new Set(PI3D).size, fixedPts: PI3D.filter((v, i) => v === i).length, cycles: cycles.length, longest: Math.max(...cycles.map(c => c.length)) }), [cycles]);
+
+  return (
+    <div className="p-3 text-sm">
+      <h1 className="text-lg font-bold mb-3">PI3D & ROT3D Analysis</h1>
+
+      <div className="flex gap-4 mb-4 flex-wrap">
+        <QualityPanel diffusionMulti={diffusionMulti} rowMatrix={rowMatrix} colMatrix={colMatrix} cycles={cycles} maxRounds={maxRounds} />
+        <div className="bg-blue-50 p-2 rounded">
+          <div className="font-bold text-xs mb-1">PI3D Stats</div>
+          <div className="text-[10px]">
+            <div>Unique: {piStats.unique}/64 | Fixed: {piStats.fixedPts}</div>
+            <div>Cycles: {piStats.cycles} | Longest: {piStats.longest}</div>
+          </div>
+        </div>
+        <div className="bg-green-50 p-2 rounded">
+          <div className="font-bold text-xs mb-1">ROT3D Stats</div>
+          <div className="text-[10px]">
+            <div>Unique: {rotStats.unique}/64 | Zeros: {rotStats.zeros}</div>
+            <div>Average: {rotStats.avg}</div>
+          </div>
+        </div>
+        <div className="bg-yellow-50 p-2 rounded">
+          <div className="font-bold text-xs mb-1">Avalanche (all 64)</div>
+          <div className="text-[10px]">
+            {avalanche.map(a => (
+              <div key={a.round} className={+a.coverage > 90 ? 'text-green-600 font-bold' : +a.coverage > 50 ? 'text-yellow-600' : 'text-red-600'}>
+                R{a.round}: {a.avgPositions}/64 ({a.coverage}%)
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap mb-4">
+        <Grid8x8 title="PI3D[i]" getData={i => PI3D[i]} getColor={(i, v) => Math.floor(v / 8) === Math.floor(i / 8) ? 'bg-red-200' : 'bg-blue-100'} infoType="pi" />
+        <Grid8x8 title="PI3D_INV[i]" getData={i => PI3D_INV[i]} getColor={() => 'bg-purple-100'} />
+        <Grid8x8 title="ROT3D" getData={i => getRotValue(i)} getColor={(i, v) => v === 0 ? 'bg-red-300' : v < 32 ? 'bg-green-100' : 'bg-blue-100'} infoType="rot" />
+        <Matrix8x8 data={rowMatrix} title={`Row Trans (${maxRounds}r)`} infoType="row" />
+        <Matrix8x8 data={colMatrix} title={`Col Trans (${maxRounds}r)`} infoType="col" />
+      </div>
+
+      <Planes4x4 title="ROT3D 4 Planes" />
+
+      <div className="bg-gray-50 p-2 rounded mb-4">
+        <div className="font-bold text-xs mb-2">
+          Diffusion Test | Position:
+          <input type="number" min={0} max={63} value={startPos} onChange={e => setStartPos(+e.target.value)} className="w-12 mx-2 border rounded px-1" />
+          | Rounds:
+          <input type="number" min={1} max={20} value={maxRounds} onChange={e => setMaxRounds(+e.target.value)} className="w-12 mx-2 border rounded px-1" />
+        </div>
+
+        <div className="flex flex-wrap mb-3">
+          <div className="mr-6">
+            <div className="text-[10px] font-bold mb-1 text-blue-700">Cumulative Single (pos {startPos})</div>
+            <CumulativeSingleVis diffusionResults={diffusionSingle} maxRounds={maxRounds} />
+          </div>
+          <div className="mr-6">
+            <div className="text-[10px] font-bold mb-1 text-green-700">Cumulative Multi (0-{startPos})</div>
+            <CumulativeMultiVis diffusionResults={diffusionMulti} maxStartPos={startPos} />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <div className="text-[10px] font-bold mb-1 text-blue-700">Per-Round Single:</div>
+            <div className="flex flex-wrap">
+              {diffusionSingle.map(d => <StateVisSingle key={d.round} affected={d.affected} round={d.round} />)}
+            </div>
+            <div className="text-[10px] mt-1">
+              {diffusionSingle.map(d => (
+                <span key={d.round} className={`mr-2 ${d.positions >= 60 ? 'text-green-600 font-bold' : d.positions >= 32 ? 'text-yellow-600' : 'text-red-600'}`}>R{d.round}:{d.positions}</span>
+              ))}
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] font-bold mb-1 text-green-700">Per-Round Multi:</div>
+            <div className="flex flex-wrap">
+              {diffusionMulti.map(d => <StateVisMulti key={d.round} affected={d.affected} round={d.round} maxStartPos={startPos} />)}
+            </div>
+            <div className="text-[10px] mt-1">
+              {diffusionMulti.map(d => (
+                <span key={d.round} className={`mr-2 ${d.positions >= 60 ? 'text-green-600 font-bold' : d.positions >= 32 ? 'text-yellow-600' : 'text-red-600'}`}>R{d.round}:{d.positions}</span>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

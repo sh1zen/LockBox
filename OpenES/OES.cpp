@@ -1,16 +1,11 @@
-#include <cstdio>
-#include <cstring>
-#include <utility>
-
 #include "asymmetric.h"
 #include "block_ciphers.h"
 #include "m_block.h"
 #include "hashing.h"
+#include "utils.h"
 #include "key_management.h"
 #include "oes-exception.h"
 #include "OES.h"
-
-#include <memory>
 
 OES::OES() = default;
 
@@ -132,30 +127,27 @@ void OES::resetIV() {
 }
 
 
-void OES::setIV(const m_block *iv, size_t len) {
+void OES::setIV(m_block *iv, const size_t len) {
     this->resetIV();
 
     if (!iv || len == 0) {
         return;
     }
 
-    auto ivData = new m_block[len];
-    std::memcpy(ivData, iv, len * sizeof(m_block));
-
     this->streamMode = true;
 
-    this->IV = new MBLOCK(ivData, len, true);
+    this->IV = new MBLOCK(iv, len, true);
 }
 
-void OES::setCtrCounter(m_block counter) {
+void OES::setCtrCounter(const m_block counter) {
     this->ctrCounter = counter;
 }
 
-void OES::setCkeStreamData(m_block data) {
+void OES::setCkeStreamData(const m_block data) {
     this->ckeStreamData = data;
 }
 
-OES *OES::hash(size_t hashLen) {
+OES *OES::hash(const size_t hashLen) {
     if (!this->plainBlock || this->plainBlock->isNull()) {
         return this;
     }
@@ -164,7 +156,9 @@ OES *OES::hash(size_t hashLen) {
         this->resetIV();
     }
 
-    MBLOCK *hash_result = oes_raw_hash(this->plainBlock, hashLen, &this->IV);
+    OESHasher hasher;
+
+    MBLOCK *hash_result = hasher.hash(this->plainBlock, hashLen, &this->IV);
     if (!hash_result) {
         return this;
     }
@@ -626,7 +620,7 @@ OES *OES::load_cipher_block(MBLOCK *data, bool take_ownership) {
     return this;
 }
 
-std::pair<void *, size_t> OES::get_data() {
+std::pair<void *, size_t> OES::get_data() const {
     if (!this->plainBlock || this->plainBlock->isNull()) {
         return std::make_pair(nullptr, 0);
     }

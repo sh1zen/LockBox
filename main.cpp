@@ -6,17 +6,21 @@
 #include <windows.h>
 #endif
 
+#include <cmath>
 #include <io.h>
-#include <fcntl.h>
+#include <iomanip>
+#include <map>
 
 #include "utility.h"
 
 #include <OpenES/OES.h>
 #include <iNode/iNode.h>
 
-#include "defines.h"
-#include "interface.h"
+#include "constants.h"
+#include "hashing.h"
 #include "io_helpers.h"
+#include "key_management.h"
+#include "prng.h"
 #include "raw-layer.h"
 
 using namespace std;
@@ -26,39 +30,66 @@ using namespace std;
 
 
 int main(int argc, char *argv[]) {
-
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
 
-    clock_t begin = clock();
+
+    prng_tests::run_all();
+
+    return 0;
 
     string str;
+
+    clock_t begin = clock();
 
     OES *enc = new OES();
     OES *dec = new OES();
     char key[] = "adv_stream_key";
-    char data1[] = "First ADV block\01";
-    char data2[] = "Second ADV block";
+    char data1[] = "First ADV block yes!";
+    char data2[] = "First ADV block yes!First ADV block yes!First ADV block yes!First ADV block yes!";
 
     enc->set_key(key);
     dec->set_key(key);
 
+    auto n = MBLOCK::fromBytes(data2, strlen(data2));
+
     // Encrypt chunks
     enc->load_data_raw(data1, strlen(data1));
+    auto p = key_expansion(n, 2048, 50, 1000);
 
-    enc->hash(20);
+    OESHasher hasher1;
+
+    hasher1.hash(n, 3, nullptr)->dump();
+    n->toggleBit(0, 1);
+    hasher1.hash(n, 3, nullptr)->dump();
+
+    // p->dump();
+
+    cout << endl << double(clock() - begin) / CLOCKS_PER_SEC << "s" << endl;
+
+    return 0;
+
+    enc->enc_cbc();
 
     enc->dump();
+
+    dec->load_cipher_block(enc->get_cipherBlock());
+
+    //dec->dec_cbc();
+
+    //dec->dump(true);
+
+    cout << endl << double(clock() - begin) / CLOCKS_PER_SEC << "s" << endl;
 
     return 0;
 
 
     enc->enc_adv();
-    MBLOCK* cipher1 = enc->get_cipherBlock();
+    MBLOCK *cipher1 = enc->get_cipherBlock();
 
     enc->load_data_raw(data2, strlen(data2));
     enc->enc_adv();
-    MBLOCK* cipher2 = enc->get_cipherBlock();
+    MBLOCK *cipher2 = enc->get_cipherBlock();
 
 
     // Decrypt chunks
@@ -77,7 +108,7 @@ int main(int argc, char *argv[]) {
 
 
     oes->set_key("cycle_key");
-    auto uuu = (char*)"cycling data through multiple rounds\0";
+    auto uuu = (char *) "cycling data through multiple rounds\0";
     oes->load_data_raw(uuu, strlen(uuu));
 
     oes->enc_adv();
@@ -88,9 +119,9 @@ int main(int argc, char *argv[]) {
 
     oes->dump(false);
 
-    pair<void*, size_t> k = oes->get_data();
+    pair<void *, size_t> k = oes->get_data();
 
-    char* buf = static_cast<char*>(k.first);
+    char *buf = static_cast<char *>(k.first);
     size_t len = k.second;
 
     cout << "\nContenuto come stringa (" << len << " bytes):\n";
@@ -109,53 +140,52 @@ int main(int argc, char *argv[]) {
         handle_error("Missing second parameter.", 1);
     }
 
- //if it's a directory ask if to encrypt it or create a lockbox
- // directory encryption: recursive by substituting files with encrypted one's
+    //if it's a directory ask if to encrypt it or create a lockbox
+    // directory encryption: recursive by substituting files with encrypted one's
     string file_path = string(R"(D:\github\LockBox\test)");
 
     fix_path_escape(file_path);
 
     //cout << "Insert iNode password: >> ";
 
-  //  string password = get_password();
+    //  string password = get_password();
 
     //cout << endl << endl;
 
     //oes->set_key(const_cast<char *>(password.c_str()));
 
-   // oes->extendWKey(10);
-
+    // oes->extendWKey(10);
 
 
     std::cout << "\n=== Example 3: Manual File Operations ===\n" << std::endl;
 
-/*
-    iNode node("C:/Users/andre/Desktop/test/archive.sc", nullptr);
-    node.display();
+    /*
+        iNode node("C:/Users/andre/Desktop/test/archive.sc", nullptr);
+        node.display();
 
-    std::cout << "All entries:" << std::endl;
-    node.walk([](Block* block, const std::string& path, iNode* n) {
-        std::cout << (block->isFile ? "  FILE: " : "  DIR:  ") << path << std::endl;
-    });
+        std::cout << "All entries:" << std::endl;
+        node.walk([](Block* block, const std::string& path, iNode* n) {
+            std::cout << (block->isFile ? "  FILE: " : "  DIR:  ") << path << std::endl;
+        });
 
-    // Walk specific subdirectory
-    std::cout << "\nEntries in 'documents':" << std::endl;
-    node.walk("documents", [](Block* block, const std::string& path, iNode* n) {
-        if (block->isFile) {
-            std::cout << "  📄 " << path << " (" << block->size << " bytes)" << std::endl;
-        }
-    });
+        // Walk specific subdirectory
+        std::cout << "\nEntries in 'documents':" << std::endl;
+        node.walk("documents", [](Block* block, const std::string& path, iNode* n) {
+            if (block->isFile) {
+                std::cout << "  📄 " << path << " (" << block->size << " bytes)" << std::endl;
+            }
+        });
 
-    // Count files by extension
-    int txtCount = 0;
-    node.walk([&txtCount](Block* block, const std::string& path, iNode* n) {
-        if (block->isFile && path.ends_with(".txt")) {
-            txtCount++;
-        }
-    });
+        // Count files by extension
+        int txtCount = 0;
+        node.walk([&txtCount](Block* block, const std::string& path, iNode* n) {
+            if (block->isFile && path.ends_with(".txt")) {
+                txtCount++;
+            }
+        });
 
-    return 0;
-*//*
+        return 0;
+    */ /*
 
     // Create new iNode
     iNode node("C:/Users/andre/Desktop/test/archive.sc", oes);
@@ -207,8 +237,6 @@ int main(int argc, char *argv[]) {
 }
 
 
-
-
 /*
 int fd = open("test_file", O_RDWR | O_CREAT, (mode_t)0600);
 const char *text = "hello";
@@ -221,4 +249,3 @@ msync(map, textsize, MS_SYNC);
 munmap(map, textsize);
 save(fd);
 */
-

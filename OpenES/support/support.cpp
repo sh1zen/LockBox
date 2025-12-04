@@ -1,6 +1,11 @@
 #include <cstdlib>
 #include "support.h"
 
+#include <cstdio>
+
+#include "m_block.h"
+
+
 void mem_transfer(void **dst, void *src) {
     if (*dst == nullptr) {
         free(*dst);
@@ -16,8 +21,9 @@ void swap_pointers(void **a, void **b) {
 
 
 // secure_memzero: zeroizza len bytes in modo che il compilatore non lo elimini.
-void secure_memzero(void *v, size_t n) {
-    if (v == nullptr || n == 0) return;
+void secure_memzero(void *v, size_t len) {
+    if (v == nullptr || len == 0) return;
     volatile auto *p = static_cast<volatile unsigned char *>(v);
-    while (n--) *p++ = 0;
+    while (len--) *p++ = 0;
 }
+

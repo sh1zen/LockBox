@@ -1,17 +1,19 @@
-#include <malloc.h>
 #include <vector>
+#include <memory>
 
 #include <OpenES/layer/raw-layer.h>
 #include "hashing.h"
 #include "constants.h"
 #include "key_management.h"
+#include "oesMath.h"
+#include "utils.h"
 
 /**
  * Compute next salt value using bit rotations
  */
 static m_block compute_next_salt(m_block current_salt, size_t count) {
-    m_block salt_count = current_salt + static_cast<m_block>(count);
-    return mBlock_rotr(count, 7) ^ mBlock_rotr(salt_count, 18);
+    const m_block salt_count = current_salt + static_cast<m_block>(count);
+    return mBlock::rotr(count, 7) ^ mBlock::rotr(salt_count, 18);
 }
 
 /**
@@ -26,52 +28,36 @@ static m_block compute_next_salt(m_block current_salt, size_t count) {
  * @return Vector of derived keys (automatically managed)
  */
 std::vector<MBLOCK *> PBKDF(const MBLOCK &key, size_t outLen, size_t count, m_block salt, size_t iterations) {
-    // Input validation
-    if (key.isNull() || key.getLen() == 0 || outLen == 0 || count == 0) {
+    if (key.isNull() || outLen == 0 || count == 0) {
         return {};
     }
 
-    std::vector<MBLOCK *> w;
-    w.reserve(count);
+    // Usa unique_ptr internamente per exception safety
+    std::vector<std::unique_ptr<MBLOCK> > temp;
+    temp.reserve(count);
 
-    // Generate each derived key
-    for (size_t i = 0; i < count; i++) {
-        MBLOCK *expanded = key_expansion(&key, outLen, salt, iterations);
-        if (!expanded || expanded->isNull()) {
-            // Cleanup on failure
-            for (auto *block: w) {
-                if (block) {
-                    block->secure_zero();
-                    delete block;
-                }
-            }
-            if (expanded) {
-                delete expanded;
-            }
-            return {};
+    for (size_t i = 0; i < count; ++i) {
+        std::unique_ptr<MBLOCK> derived(key_expansion(&key, outLen, salt, iterations));
+        if (!derived || derived->isNull()) {
+            return {}; // cleanup automatico
         }
 
-        // Clone the expanded key
-        MBLOCK *derived = expanded->clone();
-
-        // XOR with salt (assuming salt is a single m_block)
-        for (size_t j = 0; j < derived->getLen(); j++) {
-            m_block current = derived->getBlock(j);
-            derived->setBlock(j, current ^ salt);
+        for (size_t j = 0; j < derived->getLen(); ++j) {
+            derived->setBlock(j, derived->getBlock(j) ^ salt);
         }
 
-        // Add to result vector
-        w.push_back(derived);
-
-        // Clean up intermediate value
-        expanded->secure_zero();
-        delete expanded;
-
-        // Update salt for next iteration
+        temp.push_back(std::move(derived));
         salt = compute_next_salt(salt, count);
     }
 
-    return w;
+    // Rilascia ownership al chiamante
+    std::vector<MBLOCK *> result;
+    result.reserve(count);
+    for (auto &ptr: temp) {
+        result.push_back(ptr.release());
+    }
+
+    return result;
 }
 
 /**
@@ -98,59 +84,60 @@ void cleanup_pbkdf_keys(std::vector<MBLOCK *> &roundKey) {
  * @param iterations Number of iterations (min 1)
  * @return Derived key material (caller must securely free)
  */
-MBLOCK *key_expansion(const MBLOCK *key, size_t outLen, m_block salt, uint16_t iterations) {
-    // Input validation
+MBLOCK *key_expansion(const MBLOCK *key, const size_t outLen, const m_block salt, const size_t iterations) {
     if (!key || key->isNull() || outLen == 0) {
         return nullptr;
     }
 
-    // Ensure at least one iteration
     if (iterations == 0) {
         return key->clone();
     }
 
-    // Create output block initialized to zero
-    MBLOCK *out = MBLOCK::create(outLen, 0);
-    if (!out) {
-        return nullptr;
-    }
-
-    // Prepare salt||counter structure
-    MBLOCK *counterSalt = MBLOCK::create(2, 0);
+    const std::unique_ptr<MBLOCK> counterSalt(MBLOCK::create(2, 0));
     if (!counterSalt) {
-        delete out;
         return nullptr;
     }
 
     counterSalt->setBlock(0, salt);
+    counterSalt->setBlock(1, 1);
 
-    // PBKDF2-style iteration
-    for (uint32_t i = 1; i <= iterations; ++i) {
-        // Set counter in consistent byte order
-        counterSalt->setBlock(1, i);
+    // U1 = HMAC(key, salt || 1)
+    std::unique_ptr<MBLOCK> U(oes_raw_hmac(key, counterSalt.get(), outLen));
+    if (!U) {
+        return nullptr;
+    }
 
-        // Ui = HMAC(key, salt || counter)
-        MBLOCK *Ui = oes_raw_hmac(key, counterSalt, outLen);
-        if (!Ui) {
-            // Cleanup on failure
-            out->secure_zero();
-            delete out;
-            delete counterSalt;
+    // T = U1
+    std::unique_ptr<MBLOCK> out(U->clone());
+    if (!out) {
+        return nullptr;
+    }
+
+    // Iterazioni: Ui = HMAC(key, U_{i-1}), T ^= Ui
+    for (size_t iter = 2; iter <= iterations; ++iter) {
+        std::unique_ptr<MBLOCK> U_next(oes_raw_hmac(key, U.get(), outLen));
+        if (!U_next) {
             return nullptr;
         }
 
-        // Accumulate: out ^= Ui
-        out->xor_with(*Ui, false);
-
-        // Securely erase intermediate value
-        Ui->secure_zero();
-        delete Ui;
+        out->xor_with(*U_next, false);
+        U = std::move(U_next);
     }
 
-    delete counterSalt;
-    return out;
+    return out.release();
 }
 
+static inline m_block oesRcon(const size_t session, const size_t index) {
+    m_block x = DIFFUSE_CONST ^ session;
+
+    x ^= static_cast<m_block>(index);
+    x = mBlock::rotl(x, (index * 7) % OES_MEM_SIZE);
+    x ^= xtime(x);
+    x ^= mBlock::rotl(x, 13);
+    x ^= xtime(x);
+
+    return x;
+}
 
 /**
  * Generate round key from master key
@@ -162,37 +149,30 @@ MBLOCK *key_expansion(const MBLOCK *key, size_t outLen, m_block salt, uint16_t i
  * @return Round key (caller must free)
  */
 MBLOCK *key_scheduler(const MBLOCK *key, size_t outLen, size_t session) {
-    // Input validation
-    if (!key || key->isNull() || outLen == 0) {
-        return nullptr;
-    }
+    if (!key || key->isNull() || outLen == 0) return nullptr;
 
     size_t keyLen = key->getLen();
-    MBLOCK *roundKey = nullptr;
 
-    // Expand or clone key to match output length
-    if (keyLen != outLen) {
-        roundKey = key_expansion(key, outLen, 0, 1);
-    } else {
-        roundKey = key->clone();
+    MBLOCK *roundKey = (keyLen != outLen) ? key_expansion(key, outLen, session, 1) : key->clone();
+
+    if (!roundKey) return nullptr;
+
+    // session whitening iniziale
+    m_block feedback = DIFFUSE_CONST ^ session;
+    for (size_t i = 0; i < outLen; ++i) {
+        m_block b = roundKey->getBlock(i);
+
+        // combinazione di rotazioni, Rcon dinamico e feedback chaining
+        b ^= mBlock::rotl(feedback, (i * 5 + session) % OES_MEM_SIZE);
+        b ^= oesRcon(session, i);
+        b ^= feedback;
+
+        feedback = xtime(b) ^ b; // aggiornamento feedback per il prossimo blocco
+        roundKey->setBlock(i, b);
     }
 
-    if (!roundKey) {
-        return nullptr;
-    }
-
-    // Apply session-specific rotation
-    roundKey->rotr(session);
-
-    // XOR with round constant
-    m_block rcon = oesRcon[session % 256];
-    for (size_t i = 0; i < outLen; i++) {
-        if (i % 2 == 0) {
-            // alternate XOR like mBlock_xor with alternate=true
-            m_block current = roundKey->getBlock(i);
-            roundKey->setBlock(i, current ^ rcon);
-        }
-    }
+    // permutazione finale globale
+    roundKey->rotr((session * 11 + outLen) % (outLen * OES_MEM_SIZE));
 
     return roundKey;
 }

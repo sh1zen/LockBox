@@ -105,7 +105,7 @@ bool oes_generate_keypair(m_block p, m_block q, MBLOCK** publicKey, MBLOCK** pri
     m_block phi = (p - 1) * (q - 1);
 
     // Choose e (public exponent) - commonly 65537 or just use a smaller value
-    m_block e = (m_block)65537;
+    m_block e = static_cast<m_block>(65537);
     if (e >= phi) {
         e = 3; // Fallback to smaller value
     }

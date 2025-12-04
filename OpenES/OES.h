@@ -36,7 +36,7 @@ public:
 
     void deriveWKey(const char *keySalt, size_t length = 10);
 
-    void extendWKey(size_t strength = 16, m_block salt = static_cast<m_block>(MASK_TO_BLOCK_SIZE(0x451a569e, 0x451a569e)));
+    void extendWKey(size_t strength = 16, m_block salt = MASK_TO_BLOCK_SIZE(0x9e3779b97f4a7c15ULL, 0x7f4a7c159e3779b9ULL));
 
     OES *load_data_raw(void *data, size_t length = 0);
 
@@ -44,13 +44,13 @@ public:
 
     OES *load_cipher_block(MBLOCK* data, bool take_ownership = false);
 
-    std::pair<void *, size_t> get_data();
+    [[nodiscard]] std::pair<void *, size_t> get_data() const;
 
     void resetBlocks();
 
     void resetStreamState();
 
-    void setIV(const m_block *iv, size_t len);
+    void setIV(m_block *iv, size_t len);
 
     void setCtrCounter(m_block counter);
 

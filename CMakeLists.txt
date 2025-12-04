@@ -27,19 +27,26 @@ set(COMMON_SOURCES
         OpenES/algo/block_ciphers.cpp
         OpenES/support/big_int/big_int.cpp
         OpenES/algo/asymmetric.cpp
-        OpenES/algo/core.cpp
+        OpenES/algo/cipher.cpp
         OpenES/algo/hashing.cpp
         OpenES/support/support.cpp
         OpenES/support/oes-exception.cpp
         OpenES/algo/key_management.cpp
         OpenES/support/oesMath.cpp
-        OpenES/algo/homomorphic.cpp
         iNode/Block.cpp
         iNode/iNode.cpp
         iNode/inode_raw.cpp
         OpenES/layer/m_block.h
         OpenES/layer/m_block.cpp
         OpenES/algo/constants.h
+        OpenES/algo/random.cpp
+        OpenES/algo/random.h
+        OpenES/algo/core.cpp
+        OpenES/algo/core.h
+        OpenES/algo/utils.cpp
+        OpenES/algo/utils.h
+        OpenES/algo/prng.cpp
+        OpenES/algo/prng.h
 )
 
 set(APP_SOURCES
@@ -70,6 +77,9 @@ option(BUILD_TESTS "Build the test suite" OFF)
 # ======================= EXECUTABLES =======================
 if (BUILD_APP)
     add_executable(LockBox ${COMMON_SOURCES} ${APP_SOURCES})
+    target_compile_options(LockBox PRIVATE
+            $<$<CONFIG:Release>:-O3 -march=native -funroll-loops>
+    )
     if (WIN32)
         target_link_libraries(LockBox PRIVATE ws2_32)
     endif()

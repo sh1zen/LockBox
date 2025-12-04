@@ -15,23 +15,19 @@ std::pair<void *, size_t> exportBlock(MBLOCK *block, int mode) {
 
     switch (mode) {
         case OES_EXPORT_HEX: {
-            auto [fst, snd] = oes_export_block_to_hex_string(block);
-            return std::make_pair(fst, snd);
+            return oes_export_block_to_hex_string(block);
         }
 
         case OES_EXPORT_UINT8: {
-            auto [fst, snd] = block->toBytes();
-            return std::make_pair(fst, snd);
+            return block->toBytes();
         }
 
         case OES_EXPORT_CHAR: {
-            auto [fst, snd] = oes_export_block_to_string(block);
-            return std::make_pair(fst, snd);
+            return oes_export_block_to_string(block);
         }
 
         case OES_EXPORT_BASE64: {
-            auto [fst, snd] = oes_export_block_to_base64(block);
-            return std::make_pair(fst, snd);
+            return oes_export_block_to_base64(block);
         }
 
         case OES_EXPORT_RAW:
@@ -102,17 +98,17 @@ std::pair<char *, size_t> oes_export_block_to_base64(MBLOCK *block) {
         return std::make_pair(nullptr, 0);
     }
 
-    char *b64 = base64_encode(converted.first, converted.second);
+    auto b64 = base64_encode(converted.first, converted.second);
 
     // Clean up temporary buffer
     secure_memzero(converted.first, converted.second);
     free(converted.first);
 
-    if (!b64) {
+    if (!b64.first) {
         return std::make_pair(nullptr, 0);
     }
 
-    return std::make_pair(b64, strlen(b64) + 1);
+    return b64;
 }
 
 /**
@@ -219,8 +215,7 @@ MBLOCK *oes_import_block_from_base64(const char *base64String) {
         return nullptr;
     }
 
-    size_t decodedLen = 0;
-    uint8_t *decoded = base64_decode(base64String, strlen(base64String), &decodedLen);
+    auto [decoded, decodedLen] = base64_decode(base64String, strlen(base64String));
     if (!decoded || decodedLen == 0) {
         return nullptr;
     }

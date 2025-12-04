@@ -3,7 +3,9 @@
 
 #include "defines.h"
 
-#if OES_LOGIC_BLOCK_SIZE <= 16
+#if OES_LOGIC_BLOCK_SIZE <= 8
+__extension__ typedef uint8_t m_block;
+#elif OES_LOGIC_BLOCK_SIZE <= 16
 __extension__ typedef uint16_t m_block;
 #elif OES_LOGIC_BLOCK_SIZE <= 32
 __extension__ typedef uint32_t m_block;
@@ -14,14 +16,17 @@ __extension__ typedef __uint128_t m_block;
 #endif
 
 #include <cstring>
+#include <utility>
 
 class MBLOCK {
 protected:
     m_block *data;
     size_t len;
+
 public:
     // Costruttore di default
-    MBLOCK() : data(nullptr), len(0) {}
+    MBLOCK() : data(nullptr), len(0) {
+    }
 
     // Costruttore con opzione per prendere ownership o copiare
     // Se takeOwnership = true, prende ownership del puntatore d
@@ -65,11 +70,9 @@ public:
 
     // Clona l'oggetto: chiama new internamente
     [[nodiscard]] MBLOCK *clone() const {
-        auto data_copy = new m_block[len];
+        const auto data_copy = new m_block[len];
         memcpy(data_copy, data, len * sizeof(m_block));
-        auto *tmp = new MBLOCK(data_copy, len);
-        delete[] data_copy;
-        return tmp;
+        return new MBLOCK(data_copy, len, true); // takeOwnership = true
     }
 
     /**
@@ -102,10 +105,10 @@ public:
 
     [[nodiscard]] size_t getBytesLen() const;
 
-    [[nodiscard]] m_block* getData() const {
-        auto data = new m_block[len];
-        memcpy(data, data, len * sizeof(m_block));
-        return data;
+    [[nodiscard]] m_block *getData() const {
+        const auto out = new m_block[len];
+        memcpy(out, this->data, len * sizeof(m_block));
+        return out;
     }
 
     // ========== BLOCK ACCESS ==========
@@ -134,12 +137,12 @@ public:
     // ========== BIT MANIPULATION ==========
 
     // Toggle specific bit at position
-    void toggleBit(size_t pos, int bitN);
+    void toggleBit(size_t pos, int bitN) const;
 
     // ========== PADDING ==========
 
     // Create padded version from current block
-    [[nodiscard]] MBLOCK* add_padding_outer(size_t outLen, m_block pad) const;
+    [[nodiscard]] MBLOCK *add_padding_outer(size_t outLen, m_block pad) const;
 
     // Get padding length (requires external dependencies: toByte_raw and OESException)
     [[nodiscard]] size_t get_padding_size_outer() const;
@@ -147,10 +150,10 @@ public:
     // ========== MEMORY MANAGEMENT ==========
 
     // Create new MBLOCK from raw array (static factory)
-    static MBLOCK* create(size_t len, m_block value = 0);
+    static MBLOCK *create(size_t len, m_block value = 0);
 
     // Concatenate two MBLOCKs (static factory)
-    static MBLOCK* concat(const MBLOCK& a, const MBLOCK& b);
+    static MBLOCK *concat(const MBLOCK &a, const MBLOCK &b);
 
     // Extend current block
     void extend(size_t new_len, m_block fill);
@@ -161,13 +164,13 @@ public:
     // ========== CONVERSION METHODS ==========
 
     // Convert byte array to MBLOCK with padding (static factory)
-    static MBLOCK* fromBytes(const void* data, size_t nByte);
+    static MBLOCK *fromBytes(const void *data, size_t nByte);
 
     // Convert to byte array (raw, no padding removal)
-    [[nodiscard]] std::pair<uint8_t*, size_t> toBytes_raw(size_t extraSize = 0) const;
+    [[nodiscard]] std::pair<uint8_t *, size_t> toBytes_raw(size_t extraSize = 0) const;
 
     // Convert to byte array with padding removal
-    [[nodiscard]] std::pair<uint8_t*, size_t> toBytes() const;
+    [[nodiscard]] std::pair<uint8_t *, size_t> toBytes() const;
 
     // ========== DEBUG/UTILITY ==========
 

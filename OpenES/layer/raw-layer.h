@@ -5,14 +5,14 @@
 
 namespace mBlock {
 
-    inline m_block rotr(const m_block seed, size_t i) noexcept {
-        i &= (OES_MEM_SIZE - 1);
-        return (seed >> i) | (seed << ((OES_MEM_SIZE - i) & (OES_MEM_SIZE - 1)));
+    inline m_block rotr(const m_block seed, size_t r) noexcept {
+        r &= OES_MEM_SIZE_MASK;
+        return (seed >> r) | (seed << ((OES_MEM_SIZE - r) & OES_MEM_SIZE_MASK));
     }
 
     inline m_block rotl(const m_block seed, size_t r) noexcept {
-        r &= (OES_MEM_SIZE - 1);
-        return (seed << r) | (seed >> ((OES_MEM_SIZE - r) & (OES_MEM_SIZE - 1)));
+        r &= OES_MEM_SIZE_MASK;
+        return (seed << r) | (seed >> (OES_MEM_SIZE - r & OES_MEM_SIZE_MASK));
     }
 
     uint8_t getByte(m_block block, uint8_t pos);

@@ -148,10 +148,10 @@ static inline m_block oesRcon(const size_t session, const size_t index) {
  * @param session Session/round number for key scheduling
  * @return Round key (caller must free)
  */
-MBLOCK *key_scheduler(const MBLOCK *key, size_t outLen, size_t session) {
+MBLOCK *key_scheduler(const MBLOCK *key, const size_t outLen, size_t session) {
     if (!key || key->isNull() || outLen == 0) return nullptr;
 
-    size_t keyLen = key->getLen();
+    const size_t keyLen = key->getLen();
 
     MBLOCK *roundKey = (keyLen != outLen) ? key_expansion(key, outLen, session, 1) : key->clone();
 

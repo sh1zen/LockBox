@@ -27,7 +27,6 @@ set(COMMON_SOURCES
         OpenES/algo/block_ciphers.cpp
         OpenES/support/big_int/big_int.cpp
         OpenES/algo/asymmetric.cpp
-        OpenES/algo/cipher.cpp
         OpenES/algo/hashing.cpp
         OpenES/support/support.cpp
         OpenES/support/oes-exception.cpp
@@ -47,6 +46,8 @@ set(COMMON_SOURCES
         OpenES/algo/utils.h
         OpenES/algo/prng.cpp
         OpenES/algo/prng.h
+        OpenES/algo/sphinix.cpp
+        OpenES/algo/sphinix.h
 )
 
 set(APP_SOURCES

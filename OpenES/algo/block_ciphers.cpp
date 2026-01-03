@@ -1,15 +1,15 @@
 #include <memory>
 
 #include <OpenES/support/oesMath.h>
-#include "cipher.h"
 #include "key_management.h"
 #include "block_ciphers.h"
-
 #include "core.h"
 #include "defines.h"
 #include "m_block.h"
 #include "random.h"
 #include "raw-layer.h"
+#include "sphinix.h"
+#include "utils.h"
 
 // Helper function to get or create IV
 static MBLOCK *get_or_create_iv(MBLOCK *iv, size_t blockSize, m_block defaultValue) {
@@ -78,7 +78,7 @@ MBLOCK *oes_dec_adv(const MBLOCK *cipher, const MBLOCK *key, size_t *session) {
 
     const size_t cLen = cipher->getLen();
     size_t ses = session ? *session : 0;
-    const size_t originalSes = ses;  // Salva per la diffusione inversa
+    const size_t originalSes = ses; // Salva per la diffusione inversa
 
     std::unique_ptr<MBLOCK> p(cipher->clone());
     if (!p) return nullptr;
@@ -143,7 +143,7 @@ MBLOCK *oes_enc_cke(const MBLOCK *plain, const MBLOCK *key, m_block seed) {
     if (!xorKey || xorKey->isNull()) return nullptr;
 
     // Cifratura
-    std::unique_ptr<MBLOCK> cipherBlock(raw_enc(plain, keyExpanded.get()));
+    std::unique_ptr<MBLOCK> cipherBlock(SPHINX::encrypt(plain, keyExpanded.get()));
     if (!cipherBlock || cipherBlock->isNull()) return nullptr;
 
     // XOR alternato direttamente sul risultato
@@ -175,7 +175,7 @@ MBLOCK *oes_dec_cke(const MBLOCK *cipher, const MBLOCK *key, m_block seed) {
     }
 
     // Decrypt
-    std::unique_ptr<MBLOCK> plainBlock(raw_dec(cipherCopy.get(), keyExpanded.get()));
+    std::unique_ptr<MBLOCK> plainBlock(SPHINX::decrypt(cipherCopy.get(), keyExpanded.get()));
 
     return plainBlock.release();
 }
@@ -214,7 +214,7 @@ MBLOCK *oes_enc_ctr(const MBLOCK *plain, const MBLOCK *key, m_block seed, m_bloc
 
     for (size_t i = 0; i < cipherLen; i += blockSize) {
         // Encrypt nonce/counter
-        std::unique_ptr<MBLOCK> encNonceCounter(raw_enc(nonceCounterBlock.get(), key));
+        std::unique_ptr<MBLOCK> encNonceCounter(SPHINX::encrypt(nonceCounterBlock.get(), key));
         if (!encNonceCounter || encNonceCounter->isNull()) {
             delete cipher;
             return nullptr;
@@ -260,7 +260,7 @@ MBLOCK *oes_dec_ctr(const MBLOCK *cipher, const MBLOCK *key, m_block seed, m_blo
 
     for (size_t i = 0; i < cipherLen; i += blockSize) {
         // Encrypt current nonce/counter block
-        std::unique_ptr<MBLOCK> encNonceCounter(raw_enc(nonceCounterBlock.get(), key));
+        std::unique_ptr<MBLOCK> encNonceCounter(SPHINX::encrypt(nonceCounterBlock.get(), key));
         if (!encNonceCounter || encNonceCounter->isNull()) {
             delete plain;
             return nullptr;
@@ -338,7 +338,7 @@ MBLOCK *oes_enc_cbc(const MBLOCK *plain, const MBLOCK *key, MBLOCK **iv) {
         }
 
         // Encrypt the XORed block
-        std::unique_ptr<MBLOCK> encData(raw_enc(xorBlock, key));
+        std::unique_ptr<MBLOCK> encData(SPHINX::encrypt(xorBlock, key));
         delete xorBlock;
 
         if (!encData || encData->isNull()) {
@@ -404,7 +404,7 @@ MBLOCK *oes_dec_cbc(const MBLOCK *cipher, const MBLOCK *key, MBLOCK **iv) {
         }
 
         // Decrypt block
-        std::unique_ptr<MBLOCK> decData(raw_dec(currentCipherBlock, key));
+        std::unique_ptr<MBLOCK> decData(SPHINX::decrypt(currentCipherBlock, key));
         delete currentCipherBlock;
 
         if (!decData || decData->isNull()) {
@@ -433,6 +433,8 @@ MBLOCK *oes_dec_cbc(const MBLOCK *cipher, const MBLOCK *key, MBLOCK **iv) {
             }
         }
     }
+
+    plain->dump();
 
     // Remove padding
     uint32_t padding = plain->get_padding_size_outer();
@@ -488,7 +490,7 @@ MBLOCK *oes_enc_ecb(const MBLOCK *plain, const MBLOCK *key) {
         }
 
         // Encrypt block
-        std::unique_ptr<MBLOCK> encData(raw_enc(blockData, key));
+        std::unique_ptr<MBLOCK> encData(SPHINX::encrypt(blockData, key));
         delete blockData;
 
         if (!encData || encData->isNull()) {
@@ -531,7 +533,7 @@ MBLOCK *oes_dec_ecb(const MBLOCK *cipher, const MBLOCK *key) {
         }
 
         // Decrypt block
-        std::unique_ptr<MBLOCK> decData(raw_dec(blockData, key));
+        const std::unique_ptr<MBLOCK> decData(SPHINX::decrypt(blockData, key));
         delete blockData;
 
         if (!decData || decData->isNull()) {

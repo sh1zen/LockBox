@@ -108,7 +108,7 @@ void OESHasher::resetState() {
         i = static_cast<m_block>(0);
     }
     resetCarry();
-    m_domainCount = 0;  // <-- Aggiungi questo reset
+    m_domainCount = 0; // <-- Aggiungi questo reset
 }
 
 // ============================================================================
@@ -140,10 +140,7 @@ inline m_block OESHasher::derivePositionalCarry(size_t j) const {
     const m_block c2 = m_carry[(idx + 2) & mask];
     const m_block c3 = m_carry[(idx + 3) & mask];
 
-    const auto r1 = j * 7 & OES_MEM_SIZE_MASK;
-    const auto r2 = j * 11 & OES_MEM_SIZE_MASK;
-
-    return (mBlock::rotl(c0, r1) ^ mBlock::rotl(c1, r2)) + (c2 & c3);
+    return (mBlock::rotl(c0, j * 7) ^ mBlock::rotl(c1, j * 11)) + (c2 & c3);
 }
 
 

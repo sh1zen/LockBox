@@ -20,10 +20,8 @@
 namespace prng {
     // Secure clear
     void PRNG::clear() {
-        for (int i = 0; i < 16; i++) {
-            state[i] = 0;
-            col_idx[i] = 0;
-            diag_idx[i] = 0;
+        for (m_block & i : state) {
+            i = 0;
         }
         counter = 0;
         accumulator = 0;
@@ -85,31 +83,12 @@ namespace prng {
         c += d;
         b ^= c;
         b = mBlock::rotl(b, ROT4);
-
-        // Extra diffusione per blocchi >= 32 bit
-        if constexpr (OES_MEM_SIZE >= 32) {
-            a ^= mBlock::rotl(c, R1);
-            b ^= mBlock::rotl(d, R2);
-        }
     }
 
     // Public methods
     void PRNG::init(const m_block seed) {
         counter = 0;
         accumulator = 0;
-
-        // Inizializzazione indici (invariata ma con mixing migliore)
-#pragma unroll
-        for (int i = 0; i < 16; i++) {
-            m_block s = seed * PRNG_MULT1;
-            s ^= s >> S1;
-            s += s >> ((i * 4) % OES_MEM_SIZE);
-            col_idx[i] = SBOX16[(i + s) & 15];
-            diag_idx[i] = SBOX16[(i + s + 5) & 15];
-        }
-
-        // Numero passate scalato per dimensione blocco
-        constexpr int passes = (OES_MEM_SIZE <= 16) ? 4 : (OES_MEM_SIZE <= 32) ? 6 : 8;
 
         // seed hash
         m_block h = seed;
@@ -123,7 +102,7 @@ namespace prng {
         m_block s = seed;
 
 #pragma unroll
-        for (int pass = 0; pass < passes; pass++) {
+        for (int pass = 0; pass < 8; pass++) {
 #pragma unroll
             for (int i = 0; i < 16; i++) {
                 // Mixing del seed
@@ -145,7 +124,7 @@ namespace prng {
 
                 if constexpr (OES_MEM_SIZE >= 32) {
                     state[(i + 11) & 15] ^= mBlock::rotl(state[i], ROT3);
-                    state[(i + 13) & 15] ^= mBlock::rotl(state[i], R3);
+                    state[(i + 13) & 15] ^= mBlock::rotl(state[i], ROT4);
                 }
 
                 // Quarter round ogni 4 elementi
@@ -170,52 +149,48 @@ namespace prng {
 
     m_block PRNG::next() {
         m_block ctr = (counter++) * PRNG_MULT1;
-        ctr ^= ctr >> (OES_MEM_SIZE / 2);
-
-        // ========== 32/64-bit: ARX con doppio stato ==========
-        // Costanti ottimizzate per dimensione
-        constexpr int ROUNDS = (OES_MEM_SIZE <= 16) ? 6 : (OES_MEM_SIZE <= 32) ? 8 : 10;
+        ctr ^= ctr >> OES_HALF_MEM_SIZE;
 
         // Inizializzazione da counter e state
-        m_block x = ctr ^ state[ctr & 15] ^ accumulator;
-        m_block y = state[(ctr + 7) & 15];
-        y ^= y >> S1;
-        y *= PRNG_MULT1;
-        y ^= ctr;
+        m_block L = state[ctr & 15] ^ ctr ^ accumulator;
+        m_block R = state[ctr + 7 & 15] ^ (LCG_MULT * ctr + LCG_INC);
+        //R ^= R >> S1;
+
+        // Costanti ottimizzate per dimensione
+        constexpr int ROUNDS = (OES_MEM_SIZE <= 16) ? 6 : (OES_MEM_SIZE <= 32) ? 8 : 10;
 
 #pragma unroll
         for (int r = 0; r < ROUNDS; r++) {
 #pragma unroll
             for (int s = 0; s < 4; s++) {
-                x ^= mBlock::rotl(state[(ctr + r + s) & 15], ROT1 + s);
-                y ^= mBlock::rotl(state[(r + s + 5) & 15], ctr + s);
+                L ^= mBlock::rotl(state[ctr + r + s & 15], ROT1 + s);
+                R ^= mBlock::rotl(state[r + s + 2 & 15], ctr + s);
             }
 
             // Mixing moltiplicativo
-            x *= PRNG_MULT1;
-            x ^= x >> S1;
+            L *= PRNG_MULT1;
+            L ^= L >> S1;
 
             // Rotazioni per diffusione completa
-            x = mBlock::rotl(x, ROT3);
-            y = mBlock::rotl(y, R2);
+            L = mBlock::rotl(L, ROT3);
+            R = mBlock::rotl(R, ROT2);
 
             // Cross-mixing (cruciale per avalanche)
-            x ^= mBlock::rotl(y, (r + 1) & (OES_MEM_SIZE - 1));
-            y ^= mBlock::rotl(x, (r + 3) & (OES_MEM_SIZE - 1));
-            x += y;
-            y ^= mBlock::rotl(x, ROT3);
+            L ^= mBlock::rotl(R, (r + 1) & OES_MEM_SIZE_MASK);
+            R ^= mBlock::rotl(L, (r + 3) & OES_MEM_SIZE_MASK);
+            L += R;
+            R ^= mBlock::rotl(L, ROT3);
 
             // Iniezione addizionale ogni 4 round
             if ((r & 3) == 3) {
-                x ^= state[(ctr + r) & 15];
-                y *= PRNG_MULT2;
-                y ^= y >> S2;
+                L ^= state[(ctr + r) & 15];
+                R *= PRNG_MULT2;
+                R ^= R >> S2;
             }
         }
 
-
         // === Final non-bijective whitening ===
-        m_block result = x ^ y;
+        m_block result = L ^ R;
         result ^= result >> S1;
         result *= PRNG_MULT1;
         result ^= result >> S2;
@@ -253,8 +228,8 @@ namespace prng_tests {
     constexpr bool FULL_PERIOD_POSSIBLE = (OES_MEM_SIZE <= 32);
 
     constexpr uint64_t get_samples() {
-        if constexpr (OES_MEM_SIZE == 8) return 1ULL << 8;
-        if constexpr (OES_MEM_SIZE == 16) return 1ULL << 16;
+        if constexpr (OES_MEM_SIZE == 8) return 1ULL << 10;
+        if constexpr (OES_MEM_SIZE == 16) return 1ULL << 18;
         if constexpr (OES_MEM_SIZE == 32) return 1ULL << 28;
         if constexpr (OES_MEM_SIZE == 64) return 1ULL << 28;
         if constexpr (OES_MEM_SIZE == 128) return 1ULL << 28;
@@ -1170,77 +1145,182 @@ namespace prng_tests {
     // TEST 15: COLLISION TEST
     // ========================================================
     bool test_collisions() {
-        std::cout << "\n==== TEST 15: COLLISION TEST ====\n";
+    std::cout << "\n==== TEST 15: COLLISION TEST (Crypto-grade) ====\n";
 
-        if constexpr (OES_MEM_SIZE < 32) {
-            constexpr uint64_t TEST_SAMPLES = SAMPLES;
+    constexpr uint64_t TEST_SAMPLES = SAMPLES;
+    auto p = prng::PRNG(static_cast<m_block>(0xC0111510ULL));
+    clock_t start = clock();
 
-            auto p = prng::PRNG(static_cast<m_block>(0xC0111510ULL));
+    // 8, 16, 32 bit: test collisioni diretto
+    if constexpr (OES_MEM_SIZE <= 32) {
+        constexpr uint64_t SPACE_SIZE = (OES_MEM_SIZE < 64) ? (1ULL << OES_MEM_SIZE) : 0;
 
-            std::set<m_block> seen;
-            uint64_t first_collision = 0;
-            uint64_t total_collisions = 0;
+        std::vector<bool> seen(SPACE_SIZE, false);
+        uint64_t first_collision = 0;
+        uint64_t total_collisions = 0;
 
-            for (uint64_t i = 0; i < TEST_SAMPLES; ++i) {
-                m_block val = p.next();
-                if (seen.count(val)) {
-                    if (first_collision == 0) first_collision = i;
-                    ++total_collisions;
-                } else {
-                    seen.insert(val);
-                }
+        for (uint64_t i = 0; i < TEST_SAMPLES; ++i) {
+            uint32_t v = static_cast<uint32_t>(p.next());
+
+            if (seen[v]) {
+                if (first_collision == 0) first_collision = i;
+                ++total_collisions;
+            } else {
+                seen[v] = true;
             }
 
-            double expected_first = std::sqrt(M_PI / 2.0) * std::pow(2.0, OES_MEM_SIZE / 2.0);
-
-            std::cout << "Block size      : " << OES_MEM_SIZE << " bits (small)\n";
-            std::cout << "Samples         : " << TEST_SAMPLES << "\n";
-            std::cout << "Unique values   : " << seen.size() << "\n";
-            std::cout << "First collision : " << first_collision
-                    << " (expected ~" << static_cast<uint64_t>(expected_first) << ")\n";
-            std::cout << "Total collisions: " << total_collisions << "\n";
-
-            double collision_ratio = (first_collision > 0)
-                                         ? static_cast<double>(first_collision) / expected_first
-                                         : 1.0;
-            bool pass = (collision_ratio > 0.3 && collision_ratio < 3.0);
-            std::cout << "Result          : " << (pass ? "[PASS]\n" : "[FAIL]\n");
-            return pass;
-        } else {
-            constexpr uint64_t TEST_SAMPLES = 1ULL << 24;
-
-            auto p = prng::PRNG(static_cast<m_block>(0xC0111510ULL));
-
-            uint64_t suspicious_patterns = 0;
-
-            clock_t start = clock();
-
-            for (uint64_t i = 0; i < TEST_SAMPLES; ++i) {
-                m_block val = p.next();
-                uint64_t lo = to_u64(val);
-
-                if (lo == 0 || lo == UINT64_MAX) ++suspicious_patterns;
-                if (popcount_mblock(val) < 10 || popcount_mblock(val) > OES_MEM_SIZE - 10) {
-                    ++suspicious_patterns;
-                }
-
-                if ((i & 0xFFFFFULL) == 0) show_progress(i, TEST_SAMPLES, start);
-            }
-            clear_progress();
-
-            double suspicious_ratio = static_cast<double>(suspicious_patterns) / TEST_SAMPLES;
-
-            std::cout << "Block size      : " << OES_MEM_SIZE << " bits (large)\n";
-            std::cout << "Samples         : " << TEST_SAMPLES << "\n";
-            std::cout << "Suspicious vals : " << suspicious_patterns
-                    << " (" << std::setprecision(6) << (suspicious_ratio * 100) << "%)\n";
-
-            bool pass = (suspicious_ratio < 0.0001);
-            std::cout << "Result          : " << (pass ? "[PASS]\n" : "[FAIL]\n");
-            return pass;
+            if ((i & 0xFFFFF) == 0) show_progress(i, TEST_SAMPLES, start);
         }
-    }
+        clear_progress();
 
+        uint64_t unique_count = TEST_SAMPLES - total_collisions;
+
+        // Birthday paradox: E[first] ≈ sqrt(π/2) * 2^(n/2)
+        double expected_first = std::sqrt(M_PI / 2.0) * std::pow(2.0, OES_MEM_SIZE / 2.0);
+
+        // Collisioni attese: E[coll] ≈ N - S + S * e^(-N/S)  oppure  ≈ N²/(2S) per N << S
+        double expected_collisions;
+        if (TEST_SAMPLES < SPACE_SIZE) {
+            expected_collisions = TEST_SAMPLES - SPACE_SIZE * (1.0 - std::exp(-(double)TEST_SAMPLES / SPACE_SIZE));
+        } else {
+            expected_collisions = TEST_SAMPLES - SPACE_SIZE +
+                SPACE_SIZE * std::exp(-(double)TEST_SAMPLES / SPACE_SIZE);
+        }
+
+        std::cout << "Block size      : " << OES_MEM_SIZE << " bits\n";
+        std::cout << "Space size      : " << SPACE_SIZE << "\n";
+        std::cout << "Samples         : " << TEST_SAMPLES << "\n";
+        std::cout << "Unique values   : " << unique_count << "\n";
+        std::cout << "First collision : " << first_collision
+                  << " (expected ~" << static_cast<uint64_t>(expected_first) << ")\n";
+        std::cout << "Total collisions: " << total_collisions
+                  << " (expected ~" << static_cast<uint64_t>(expected_collisions) << ")\n";
+
+        // Ratio per prima collisione
+        double first_ratio = (first_collision > 0)
+            ? static_cast<double>(first_collision) / expected_first
+            : (TEST_SAMPLES < expected_first ? 1.0 : 0.0);
+
+        // Ratio per collisioni totali
+        double coll_ratio = (expected_collisions > 10)
+            ? static_cast<double>(total_collisions) / expected_collisions
+            : 1.0;
+
+        std::cout << "First ratio     : " << std::setprecision(3) << first_ratio << "\n";
+        std::cout << "Collision ratio : " << std::setprecision(3) << coll_ratio << "\n";
+
+        // Pass criteria
+        bool first_pass = (first_ratio > 0.3 && first_ratio < 3.0) ||
+                          (TEST_SAMPLES < expected_first);  // Non abbastanza samples
+        bool coll_pass = (coll_ratio > 0.5 && coll_ratio < 2.0) ||
+                         (expected_collisions < 10);  // Troppo poche per statistica
+
+        bool pass = first_pass && coll_pass;
+        std::cout << "Result          : first=" << (first_pass ? "OK" : "FAIL")
+                  << " coll=" << (coll_pass ? "OK" : "FAIL")
+                  << (pass ? " [PASS]\n" : " [FAIL]\n");
+        return pass;
+    }
+    // 64, 128 bit: test statistico crypto-grade
+    else {
+        uint64_t extreme_values = 0;
+        uint64_t low_popcount = 0;
+        uint64_t high_popcount = 0;
+        uint64_t run_anomalies = 0;
+        uint64_t byte_bias = 0;
+
+        std::vector<uint64_t> byte_dist(256, 0);
+
+        constexpr int expected_pc = OES_MEM_SIZE / 2;
+        constexpr double pc_sigma = (OES_MEM_SIZE == 64) ? 4.0 : 5.66;
+        constexpr int pc_threshold = static_cast<int>(2.0 * pc_sigma);
+        // Max run atteso: log2(n * bits) + margine
+        // Per 64 bit, 268M samples: log2(268M * 64) ≈ 34, usiamo ~20 con margine
+        // Per 128 bit, 268M samples: log2(268M * 128) ≈ 35, usiamo ~22 con margine
+        constexpr int max_run = (OES_MEM_SIZE == 64) ? 20 : 22;
+
+        for (uint64_t i = 0; i < TEST_SAMPLES; ++i) {
+            m_block val = p.next();
+            uint64_t lo = to_u64(val);
+            uint64_t hi = (OES_MEM_SIZE > 64) ? to_u64(val >> 64) : 0;
+
+            // Test 1: Valori estremi
+            if (val == static_cast<m_block>(0)) ++extreme_values;
+            if (val == ~static_cast<m_block>(0)) ++extreme_values;
+
+            // Test 2: Popcount
+            int pc = popcount_mblock(val);
+            if (pc < expected_pc - pc_threshold) ++low_popcount;
+            if (pc > expected_pc + pc_threshold) ++high_popcount;
+
+            // Test 3: Run di bit consecutivi
+            int curr_run = 1;
+            bool last_bit = lo & 1;
+            for (int b = 1; b < OES_MEM_SIZE; ++b) {
+                bool bit = (b < 64) ? ((lo >> b) & 1) : ((hi >> (b - 64)) & 1);
+                if (bit == last_bit) {
+                    if (++curr_run > max_run) { ++run_anomalies; break; }
+                } else {
+                    curr_run = 1;
+                    last_bit = bit;
+                }
+            }
+
+            // Test 4: Distribuzione byte
+            uint8_t* bytes = reinterpret_cast<uint8_t*>(&val);
+            for (int b = 0; b < OES_MEM_SIZE / 8; ++b) {
+                byte_dist[bytes[b]]++;
+                if (bytes[b] == 0x00 || bytes[b] == 0xFF) ++byte_bias;
+            }
+
+            if ((i & 0xFFFFF) == 0) show_progress(i, TEST_SAMPLES, start);
+        }
+        clear_progress();
+
+        // Chi-squared
+        double expected_per_byte = static_cast<double>(TEST_SAMPLES) * (OES_MEM_SIZE / 8) / 256.0;
+        double chi_squared = 0;
+        for (int b = 0; b < 256; ++b) {
+            double diff = byte_dist[b] - expected_per_byte;
+            chi_squared += (diff * diff) / expected_per_byte;
+        }
+
+        uint64_t total_bytes = TEST_SAMPLES * (OES_MEM_SIZE / 8);
+        double byte_bias_ratio = static_cast<double>(byte_bias) / total_bytes;
+
+        std::cout << "Block size      : " << OES_MEM_SIZE << " bits\n";
+        std::cout << "Samples         : " << TEST_SAMPLES << "\n\n";
+
+        std::cout << "Extreme values  : " << extreme_values
+                  << (extreme_values > 0 ? " [SUSPECT]" : "") << "\n";
+        std::cout << "Low popcount    : " << low_popcount
+                  << (low_popcount > 0 ? " (1:" + std::to_string(TEST_SAMPLES / low_popcount) + ")" : "") << "\n";
+        std::cout << "High popcount   : " << high_popcount
+                  << (high_popcount > 0 ? " (1:" + std::to_string(TEST_SAMPLES / high_popcount) + ")" : "") << "\n";
+        std::cout << "Run anomalies   : " << run_anomalies
+                  << (run_anomalies > 0 ? " (1:" + std::to_string(TEST_SAMPLES / run_anomalies) + ")" : "") << "\n";
+        std::cout << "Chi-squared     : " << std::fixed << std::setprecision(2)
+                  << chi_squared << " (good: 180-330)\n";
+        std::cout << "Byte bias       : " << std::setprecision(4) << (byte_bias_ratio * 100)
+                  << "% (expected: 0.78%)\n";
+
+        bool pop_pass = (static_cast<double>(low_popcount + high_popcount) / TEST_SAMPLES) < 0.05;
+        bool run_pass = (static_cast<double>(run_anomalies) / TEST_SAMPLES) < 0.01;
+        bool ext_pass = (extreme_values == 0);
+        bool chi_pass = (chi_squared > 180.0 && chi_squared < 330.0);
+        bool byte_pass = (byte_bias_ratio > 0.006 && byte_bias_ratio < 0.010);
+
+        bool pass = pop_pass && run_pass && ext_pass && chi_pass && byte_pass;
+
+        std::cout << "\nCrypto checks   : pop=" << (pop_pass ? "OK" : "FAIL")
+                  << " run=" << (run_pass ? "OK" : "FAIL")
+                  << " ext=" << (ext_pass ? "OK" : "FAIL")
+                  << " chi=" << (chi_pass ? "OK" : "FAIL")
+                  << " byte=" << (byte_pass ? "OK" : "FAIL") << "\n";
+        std::cout << "Result          : " << (pass ? "[PASS]\n" : "[FAIL]\n");
+        return pass;
+    }
+}
 
     // ========================================================
     // TEST 2: RUNS TEST (Enhanced)
@@ -1250,12 +1330,8 @@ namespace prng_tests {
 
         // Numero di campioni - adattato alla dimensione del blocco
         constexpr uint64_t SAMPLES = (OES_MEM_SIZE <= 16)
-                                         ? (1ULL << 24)
-                                         : // 16M
-                                         (OES_MEM_SIZE <= 32)
-                                             ? (1ULL << 26)
-                                             : // 67M
-                                             (1ULL << 26); // 67M
+                                         ? (1ULL << 24) // 16M
+                                         : (1ULL << 26); //67MB
 
         // Massima lunghezza run da tracciare (oltre questo, raggruppiamo)
         constexpr int MAX_RUN_LEN = 12;
@@ -1839,17 +1915,17 @@ namespace prng_tests {
 
         uint64_t collisions = 0;
         Vec<uint64_t> spacings;
-        spacings.reserve(static_cast<size_t>(N));
+        spacings.reserve(N);
 
         for (uint64_t i = 1; i < N; ++i) {
-            if (values[static_cast<size_t>(i)] == values[static_cast<size_t>(i - 1)]) {
+            if (values[i] == values[(i - 1)]) {
                 ++collisions;
             }
-            spacings.push_back(values[static_cast<size_t>(i)] - values[static_cast<size_t>(i - 1)]);
+            spacings.push_back(values[i] - values[static_cast<size_t>(i - 1)]);
         }
 
-        const double expected_collisions = static_cast<double>(N) * static_cast<double>(N) /
-                                           (2.0 * static_cast<double>(SPACE));
+        constexpr double expected_collisions = static_cast<double>(N) * static_cast<double>(N) /
+                                               (2.0 * static_cast<double>(SPACE));
 
         std::sort(spacings.begin(), spacings.end());
 

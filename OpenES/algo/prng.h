@@ -7,11 +7,6 @@
 
 namespace prng {
     class PRNG {
-        static constexpr int R1 = (OES_MEM_SIZE * 07) / 64 + 1;
-        static constexpr int R2 = (OES_MEM_SIZE * 17) / 64 + 1;
-        static constexpr int R3 = (OES_MEM_SIZE * 29) / 64 + 1;
-        static constexpr int R4 = (OES_MEM_SIZE * 43) / 64 + 1;
-
         static constexpr int S1 = (OES_MEM_SIZE * 30) / 64 + 1;
         static constexpr int S2 = (OES_MEM_SIZE * 27) / 64 + 1;
         static constexpr int S3 = (OES_MEM_SIZE * 32) / 64 + 1;
@@ -28,8 +23,6 @@ namespace prng {
                                                     : (OES_MEM_SIZE <= 64)
                                                           ? 7
                                                           : 13;
-
-        static constexpr int FEISTEL_ROUNDS = (OES_MEM_SIZE <= 16) ? 4 : (OES_MEM_SIZE <= 32) ? 2 : 1;
 
         static constexpr m_block LCG_MULT = (OES_MEM_SIZE <= 8)
                                                 ? static_cast<m_block>(141)
@@ -50,12 +43,6 @@ namespace prng {
                                                            : (OES_MEM_SIZE <= 64)
                                                                  ? static_cast<m_block>(1442695040888963407ULL)
                                                                  : (PRNG_SEED | 1);
-
-        alignas(64) static inline
-        constexpr uint8_t SBOX16[16] = {
-            0xC, 0x5, 0x6, 0xB, 0x9, 0x0, 0xA, 0xD,
-            0x3, 0xE, 0xF, 0x8, 0x4, 0x7, 0x1, 0x2
-        };
 
         alignas(64) static inline
         constexpr uint8_t SBOX256[256] = {
@@ -94,8 +81,6 @@ namespace prng {
         };
 
         alignas(64) m_block state[16]{};
-        alignas(64) uint8_t col_idx[16]{};
-        alignas(64) uint8_t diag_idx[16]{};
 
         m_block counter;
         m_block accumulator;
@@ -106,33 +91,28 @@ namespace prng {
 
     public:
         // Constructor (requires seed)
-        explicit PRNG(const m_block seed) : state{}, col_idx{}, diag_idx{}, counter(0), accumulator(0) {
+        explicit PRNG(const m_block seed) : state{}, counter(0), accumulator(0) {
             init(seed);
         }
 
         // Copy constructor (clone)
-        PRNG(const PRNG &other) : counter(other.counter) {
+        PRNG(const PRNG &other) : counter(other.counter), accumulator(other.counter) {
             std::memcpy(state, other.state, sizeof(state));
-            std::memcpy(col_idx, other.col_idx, sizeof(col_idx));
-            std::memcpy(diag_idx, other.diag_idx, sizeof(diag_idx));
         }
 
         // Copy assignment operator (clone)
         PRNG &operator=(const PRNG &other) {
             if (this != &other) {
                 counter = other.counter;
+                accumulator = other.accumulator;
                 std::memcpy(state, other.state, sizeof(state));
-                std::memcpy(col_idx, other.col_idx, sizeof(col_idx));
-                std::memcpy(diag_idx, other.diag_idx, sizeof(diag_idx));
             }
             return *this;
         }
 
         // Move constructor
-        PRNG(PRNG &&other) noexcept : counter(other.counter) {
+        PRNG(PRNG &&other) noexcept : counter(other.counter), accumulator(other.counter) {
             std::memcpy(state, other.state, sizeof(state));
-            std::memcpy(col_idx, other.col_idx, sizeof(col_idx));
-            std::memcpy(diag_idx, other.diag_idx, sizeof(diag_idx));
             other.clear();
         }
 
@@ -140,9 +120,8 @@ namespace prng {
         PRNG &operator=(PRNG &&other) noexcept {
             if (this != &other) {
                 counter = other.counter;
+                accumulator = other.accumulator;
                 std::memcpy(state, other.state, sizeof(state));
-                std::memcpy(col_idx, other.col_idx, sizeof(col_idx));
-                std::memcpy(diag_idx, other.diag_idx, sizeof(diag_idx));
                 other.clear();
             }
             return *this;

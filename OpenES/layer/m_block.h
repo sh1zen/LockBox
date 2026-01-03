@@ -40,6 +40,12 @@ public:
         }
     }
 
+    explicit MBLOCK(const size_t l) : data(nullptr), len(l) {
+        if (l > 0) {
+            data = new m_block[l]();
+        }
+    }
+
     // Distruttore
     ~MBLOCK() {
         delete[] data;
@@ -176,6 +182,28 @@ public:
 
     // Dump block content for debugging (requires external dependencies: toByte_raw)
     void dump(bool printable = false) const;
+
+
+    // operators
+
+    // Ritorna un riferimento al puntatore dati (modificabile)
+    [[nodiscard]] m_block *&getDataRef() {
+        return data;
+    }
+
+    // Element access (non-const)
+    m_block &operator[](size_t i) {
+        // Optional bounds check
+        // if (i >= len) throw std::out_of_range("MBLOCK index");
+        return data[i];
+    }
+
+    // Element access (const)
+    const m_block &operator[](size_t i) const {
+        // Optional bounds check
+        // if (i >= len) throw std::out_of_range("MBLOCK index");
+        return data[i];
+    }
 };
 
 #endif //LOCKBOX_M_BLOCK_H

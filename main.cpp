@@ -22,6 +22,7 @@
 #include "key_management.h"
 #include "prng.h"
 #include "raw-layer.h"
+#include "sphinix.h"
 
 using namespace std;
 
@@ -33,10 +34,9 @@ int main(int argc, char *argv[]) {
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
 
+  //  prng_tests::run_all();
 
-    prng_tests::run_all();
-
-    return 0;
+    // return 0;
 
     string str;
 
@@ -46,28 +46,12 @@ int main(int argc, char *argv[]) {
     OES *dec = new OES();
     char key[] = "adv_stream_key";
     char data1[] = "First ADV block yes!";
-    char data2[] = "First ADV block yes!First ADV block yes!First ADV block yes!First ADV block yes!";
+    char data2[] = "checking encriptation 0101!";
 
     enc->set_key(key);
     dec->set_key(key);
 
-    auto n = MBLOCK::fromBytes(data2, strlen(data2));
-
-    // Encrypt chunks
-    enc->load_data_raw(data1, strlen(data1));
-    auto p = key_expansion(n, 2048, 50, 1000);
-
-    OESHasher hasher1;
-
-    hasher1.hash(n, 3, nullptr)->dump();
-    n->toggleBit(0, 1);
-    hasher1.hash(n, 3, nullptr)->dump();
-
-    // p->dump();
-
-    cout << endl << double(clock() - begin) / CLOCKS_PER_SEC << "s" << endl;
-
-    return 0;
+    enc->load_data_raw(data2, strlen(data2));
 
     enc->enc_cbc();
 
@@ -75,31 +59,26 @@ int main(int argc, char *argv[]) {
 
     dec->load_cipher_block(enc->get_cipherBlock());
 
-    //dec->dec_cbc();
+    dec->dec_cbc();
 
-    //dec->dump(true);
+    dec->dump();
 
     cout << endl << double(clock() - begin) / CLOCKS_PER_SEC << "s" << endl;
 
     return 0;
 
 
-    enc->enc_adv();
-    MBLOCK *cipher1 = enc->get_cipherBlock();
-
     enc->load_data_raw(data2, strlen(data2));
-    enc->enc_adv();
-    MBLOCK *cipher2 = enc->get_cipherBlock();
+    enc->enc_ctr();
+    MBLOCK *cipher1 = enc->get_cipherBlock();
 
 
     // Decrypt chunks
     dec->load_cipher_block(cipher1, false);
-    dec->dec_adv();
+    dec->dec_ctr();
     dec->dump(true);
 
-    dec->load_cipher_block(cipher2, false);
-    dec->dec_adv();
-    dec->dump(true);
+
 
     return 0;
 

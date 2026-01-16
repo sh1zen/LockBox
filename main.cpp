@@ -53,13 +53,17 @@ int main(int argc, char *argv[]) {
 
     enc->load_data_raw(data2, strlen(data2));
 
-    enc->enc_cbc();
+    enc->enc_adv();
+
+    enc->dump();
+
+    enc->enc_adv();
 
     enc->dump();
 
     dec->load_cipher_block(enc->get_cipherBlock());
 
-    dec->dec_cbc();
+    dec->dec_adv();
 
     dec->dump();
 

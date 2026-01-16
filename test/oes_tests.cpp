@@ -191,18 +191,18 @@ TEST(CBCRoundTripCustomIV) {
 }
 
 TEST(CBCDifferentIVDifferentCiphertext) {
-    OES *oes1 = new OES();
-    OES *oes2 = new OES();
+    const auto oes1 = new OES();
+    const auto oes2 = new OES();
     char key[] = "same_key";
     char data[] = "same plaintext data";
 
     oes1->set_key(key);
     oes2->set_key(key);
 
-    size_t blockSize = 4;
+    constexpr size_t blockSize = 4;
 
-    auto *iv1 = (m_block *) malloc(blockSize * sizeof(m_block));
-    auto *iv2 = (m_block *) malloc(blockSize * sizeof(m_block));
+    auto *iv1 = static_cast<m_block *>(malloc(blockSize * sizeof(m_block)));
+    auto *iv2 = static_cast<m_block *>(malloc(blockSize * sizeof(m_block)));
     for (size_t i = 0; i < blockSize; i++) {
         iv1[i] = MASK_TO_BLOCK_SIZE(0x1111111111111111, 0x1111111111111111);
         iv2[i] = MASK_TO_BLOCK_SIZE(0x2222222222222222, 0x2222222222222222);

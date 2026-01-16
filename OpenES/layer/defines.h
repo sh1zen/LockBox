@@ -2,11 +2,15 @@
 #define LOCKBOX_DEFINES_H
 
 #ifndef OES_NUM_OF_BLOCK
-#define OES_NUM_OF_BLOCK 8
+#define OES_NUM_OF_BLOCK 16
 #endif
 
 #ifndef OES_LOGIC_BLOCK_SIZE
 #define OES_LOGIC_BLOCK_SIZE 128
+#endif
+
+#if OES_NUM_OF_BLOCK % 2 != 0
+#error "OES_NUM_OF_BLOCK must be a multpiple of 2"
 #endif
 
 #if (OES_LOGIC_BLOCK_SIZE % 8 != 0 || OES_LOGIC_BLOCK_SIZE < 8 || OES_LOGIC_BLOCK_SIZE > 128)

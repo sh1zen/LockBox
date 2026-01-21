@@ -1,15 +1,15 @@
 #ifndef LOCKBOX_DEFINES_H
 #define LOCKBOX_DEFINES_H
 
-#ifndef OES_NUM_OF_BLOCK
-#define OES_NUM_OF_BLOCK 16
+#ifndef OES_NUM_OF_BLOCKS
+#define OES_NUM_OF_BLOCKS 16
 #endif
 
 #ifndef OES_LOGIC_BLOCK_SIZE
 #define OES_LOGIC_BLOCK_SIZE 128
 #endif
 
-#if OES_NUM_OF_BLOCK % 2 != 0
+#if OES_NUM_OF_BLOCKS % 2 != 0
 #error "OES_NUM_OF_BLOCK must be a multpiple of 2"
 #endif
 
@@ -59,10 +59,11 @@ typedef signed long long int64_t;
 typedef unsigned long long uint64_t;
 
 
-#define OES_EXPORT_RAW 1
-#define OES_EXPORT_UINT8 2
-#define OES_EXPORT_HEX 3
-#define OES_EXPORT_CHAR 4
+#define OES_TYPE_RAW_UINT8 0
+#define OES_TYPE_RAW 1
+#define OES_TYPE_UINT8 2
+#define OES_TYPE_HEX 3
+#define OES_TYPE_CHAR 4
 #define OES_EXPORT_BASE64 5
 
 #define OES_EXCEPTION_INV_PAD 5

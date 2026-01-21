@@ -578,18 +578,29 @@ OES *OES::load_cipher_data_raw(void *data, size_t length) {
         throw OESException("Invalid cipher data passed");
     }
 
+    // I dati cifrati devono essere multiplo della dimensione del blocco
+    if (length % OES_BYTES_X_BLOCK != 0) {
+        throw OESException("Cipher data length must be multiple of block size");
+    }
+
     if (cipherBlock) {
         cipherBlock->secure_zero();
         delete cipherBlock;
         cipherBlock = nullptr;
     }
+
     if (plainBlock) {
         plainBlock->secure_zero();
         delete plainBlock;
         plainBlock = nullptr;
     }
 
-    this->cipherBlock = MBLOCK::fromBytes(data, length);
+    // USA fromBytes_raw per dati cifrati (niente padding aggiuntivo)
+    this->cipherBlock = MBLOCK::fromBytes_raw(data, length);
+
+    if (!this->cipherBlock) {
+        throw OESException("Failed to load cipher data");
+    }
 
     return this;
 }
@@ -625,4 +636,11 @@ std::pair<void *, size_t> OES::get_data() const {
         return std::make_pair(nullptr, 0);
     }
     return this->plainBlock->toBytes();
+}
+
+std::pair<void *, size_t> OES::get_cipher_data() const {
+    if (!this->cipherBlock || this->cipherBlock->isNull()) {
+        return std::make_pair(nullptr, 0);
+    }
+    return this->cipherBlock->toBytes();
 }

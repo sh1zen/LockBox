@@ -1,10 +1,8 @@
 #include <cstdlib>
+
 #include "support.h"
 
-#include <cstdio>
-
-#include "m_block.h"
-
+#include <cstring>
 
 void mem_transfer(void **dst, void *src) {
     if (*dst == nullptr) {
@@ -26,4 +24,3 @@ void secure_memzero(void *v, size_t len) {
     volatile auto *p = static_cast<volatile unsigned char *>(v);
     while (len--) *p++ = 0;
 }
-

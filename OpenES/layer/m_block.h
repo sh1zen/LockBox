@@ -1,13 +1,9 @@
-#ifndef LOCKBOX_M_BLOCK_H
-#define LOCKBOX_M_BLOCK_H
+#pragma once
 
-// ============================================================================
-//  INCLUDES
-// ============================================================================
-
-#include "defines.h"
 #include <cstring>
 #include <utility>
+
+#include "defines.h"
 
 // ============================================================================
 //  TYPE DEFINITIONS
@@ -22,7 +18,7 @@
 #elif OES_LOGIC_BLOCK_SIZE <= 64
     __extension__ typedef uint64_t m_block;
 #elif OES_LOGIC_BLOCK_SIZE <= 128
-    __extension__ typedef __uint128_t m_block;
+__extension__ typedef __uint128_t m_block;
 #endif
 
 // ============================================================================
@@ -30,17 +26,17 @@
 // ============================================================================
 
 class MBLOCK {
-
 protected:
-    m_block* data;
-    size_t   len;
+    m_block *data;
+    size_t len;
 
 public:
     // ======================================================================
     //  LIFECYCLE MANAGEMENT
     // ======================================================================
 
-    MBLOCK() : data(nullptr), len(0) {}
+    MBLOCK() : data(nullptr), len(0) {
+    }
 
     explicit MBLOCK(size_t l) : data(nullptr), len(l) {
         if (l > 0) {
@@ -48,7 +44,7 @@ public:
         }
     }
 
-    MBLOCK(m_block* d, size_t l, bool takeOwnership = false)
+    MBLOCK(m_block *d, size_t l, bool takeOwnership = false)
         : data(nullptr), len(l) {
         if (takeOwnership) {
             data = d;
@@ -59,35 +55,42 @@ public:
     }
 
     ~MBLOCK() {
-        delete[] data;
+        if (data) {
+            secure_zero();
+            delete[] data;
+        }
     }
 
     // ======================================================================
     //  COPY / MOVE SEMANTICS
     // ======================================================================
 
-    MBLOCK(const MBLOCK&)            = delete;
-    MBLOCK& operator=(const MBLOCK&) = delete;
+    MBLOCK(const MBLOCK &) = delete;
 
-    MBLOCK(MBLOCK&& other) noexcept
+    MBLOCK &operator=(const MBLOCK &) = delete;
+
+    MBLOCK(MBLOCK &&other) noexcept
         : data(other.data), len(other.len) {
         other.data = nullptr;
-        other.len  = 0;
+        other.len = 0;
     }
 
-    MBLOCK& operator=(MBLOCK&& other) noexcept {
+    MBLOCK &operator=(MBLOCK &&other) noexcept {
         if (this != &other) {
-            delete[] data;
+            if (data) {
+                secure_zero();
+                delete[] data;
+            }
             data = other.data;
-            len  = other.len;
+            len = other.len;
             other.data = nullptr;
-            other.len  = 0;
+            other.len = 0;
         }
         return *this;
     }
 
-    [[nodiscard]] MBLOCK* clone() const {
-        auto* data_copy = new m_block[len];
+    [[nodiscard]] MBLOCK *clone() const {
+        auto *data_copy = new m_block[len];
         std::memcpy(data_copy, data, len * sizeof(m_block));
         return new MBLOCK(data_copy, len, true);
     }
@@ -110,13 +113,13 @@ public:
 
     [[nodiscard]] size_t getBytesLen() const;
 
-    [[nodiscard]] m_block* getData() const {
-        auto* out = new m_block[len];
+    [[nodiscard]] m_block *getData() const {
+        auto *out = new m_block[len];
         std::memcpy(out, data, len * sizeof(m_block));
         return out;
     }
 
-    [[nodiscard]] m_block*& getDataRef() {
+    [[nodiscard]] m_block *&getDataRef() {
         return data;
     }
 
@@ -128,29 +131,32 @@ public:
      * Update block with new data transferring ownership.
      * If data is nullptr, the block is cleared but still allocated.
      */
-    void update(m_block* newData, size_t newLen) {
-        if (!isNull()) {
+    void update(m_block *newData, size_t newLen) {
+        if (data) {
+            secure_zero();
             delete[] data;
         }
         data = newData;
-        len  = newLen;
+        len = newLen;
     }
 
     void extend(size_t new_len, m_block fill);
-    void secure_zero();
+
+    void secure_zero() const;
 
     // ======================================================================
     //  ELEMENT / BLOCK ACCESS
     // ======================================================================
 
-    bool setBlock(size_t pos, m_block value);
+    bool setBlock(size_t pos, m_block value) const;
+
     [[nodiscard]] m_block getBlock(size_t pos) const;
 
-    m_block& operator[](size_t i) {
+    m_block &operator[](size_t i) {
         return data[i];
     }
 
-    const m_block& operator[](size_t i) const {
+    const m_block &operator[](size_t i) const {
         return data[i];
     }
 
@@ -158,14 +164,15 @@ public:
     //  BLOCK OPERATIONS
     // ======================================================================
 
-    void xor_with(const MBLOCK& other, bool alternate = false);
+    void xor_with(const MBLOCK &other, bool alternate = false) const;
 
     // ======================================================================
     //  ROTATIONS
     // ======================================================================
 
-    void rotr(size_t i);
-    void rotl(size_t i);
+    void rotr(size_t i) const;
+
+    void rotl(size_t i) const;
 
     // ======================================================================
     //  BIT MANIPULATION
@@ -177,33 +184,36 @@ public:
     //  PADDING
     // ======================================================================
 
-    [[nodiscard]] MBLOCK* add_padding_outer(size_t outLen, m_block pad) const;
-    [[nodiscard]] size_t  get_padding_size_outer() const;
+    [[nodiscard]] MBLOCK *add_padding_outer(size_t outLen, m_block pad) const;
+
+    [[nodiscard]] size_t get_padding_size_outer() const;
 
     // ======================================================================
     //  FACTORIES & COMPOSITION
     // ======================================================================
 
-    static MBLOCK* create(size_t len, m_block value = 0);
-    static MBLOCK* concat(const MBLOCK& a, const MBLOCK& b);
+    static MBLOCK *create(size_t len, m_block value = 0);
+
+    static MBLOCK *concat(const MBLOCK &a, const MBLOCK &b);
 
     // ======================================================================
     //  BYTE CONVERSIONS
     // ======================================================================
 
-    static MBLOCK* fromBytes(const void* data, size_t nByte);
+    // Conversione da bytes CON padding (per plaintext)
+    static MBLOCK *fromBytes(const void *src, size_t nByte);
 
-    [[nodiscard]] std::pair<uint8_t*, size_t>
+    // Conversione da bytes SENZA padding (per ciphertext)
+    static MBLOCK *fromBytes_raw(const void *src, size_t nByte);
+
+    [[nodiscard]] std::pair<uint8_t *, size_t>
     toBytes_raw(size_t extraSize = 0) const;
 
-    [[nodiscard]] std::pair<uint8_t*, size_t>
+    [[nodiscard]] std::pair<uint8_t *, size_t>
     toBytes() const;
 
     // ======================================================================
     //  DEBUG / UTILITIES
     // ======================================================================
-
     void dump(bool printable = false) const;
 };
-
-#endif // LOCKBOX_M_BLOCK_H

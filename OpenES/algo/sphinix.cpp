@@ -98,12 +98,12 @@ namespace SPHINX {
     // ============================================================================
     // WIDE-BLOCK CONFIGURATION
     // ============================================================================
-    static_assert(OES_NUM_OF_BLOCK >= 1 && OES_NUM_OF_BLOCK <= 16,
+    static_assert(OES_NUM_OF_BLOCKS >= 1 && OES_NUM_OF_BLOCKS <= 16,
                   "OES_NUM_OF_BLOCK must be between 1 and 16");
 
-    constexpr size_t WIDE_BLOCK_BITS = OES_MEM_SIZE * OES_NUM_OF_BLOCK;
-    constexpr size_t KEY_BLOCKS = OES_NUM_OF_BLOCK;
-    constexpr size_t SCHEDULER_STATE_SIZE = (OES_NUM_OF_BLOCK < 4) ? 4 : OES_NUM_OF_BLOCK;
+    constexpr size_t WIDE_BLOCK_BITS = OES_MEM_SIZE * OES_NUM_OF_BLOCKS;
+    constexpr size_t KEY_BLOCKS = OES_NUM_OF_BLOCKS;
+    constexpr size_t SCHEDULER_STATE_SIZE = (OES_NUM_OF_BLOCKS < 4) ? 4 : OES_NUM_OF_BLOCKS;
     constexpr size_t BYTES_PER_BLOCK = OES_MEM_SIZE / 8;
 
     // ============================================================================
@@ -208,10 +208,10 @@ namespace SPHINX {
         else if constexpr (OES_MEM_SIZE == 32) base = 16;
 
         size_t extra = 0;
-        if constexpr (OES_NUM_OF_BLOCK >= 2) extra += 4;
-        if constexpr (OES_NUM_OF_BLOCK >= 4) extra += 4;
-        if constexpr (OES_NUM_OF_BLOCK >= 8) extra += 4;
-        if constexpr (OES_NUM_OF_BLOCK >= 16) extra += 4;
+        if constexpr (OES_NUM_OF_BLOCKS >= 2) extra += 4;
+        if constexpr (OES_NUM_OF_BLOCKS >= 4) extra += 4;
+        if constexpr (OES_NUM_OF_BLOCKS >= 8) extra += 4;
+        if constexpr (OES_NUM_OF_BLOCKS >= 16) extra += 4;
 
         return base + extra;
     }();
@@ -221,8 +221,8 @@ namespace SPHINX {
      * More blocks require more mixing for key derivation
      */
     constexpr size_t SCHEDULER_PERMUTE_ROUNDS = []() constexpr -> size_t {
-        if constexpr (OES_NUM_OF_BLOCK >= 16) return 20;
-        if constexpr (OES_NUM_OF_BLOCK >= 8) return 16;
+        if constexpr (OES_NUM_OF_BLOCKS >= 16) return 20;
+        if constexpr (OES_NUM_OF_BLOCKS >= 8) return 16;
         return 12;
     }();
 
@@ -231,9 +231,9 @@ namespace SPHINX {
      * More blocks = more rounds for complete cross-block mixing
      */
     constexpr size_t WIDE_SBOX_ROUNDS = []() constexpr -> size_t {
-        if constexpr (OES_NUM_OF_BLOCK >= 8) return 6;
-        if constexpr (OES_NUM_OF_BLOCK >= 4) return 4;
-        if constexpr (OES_NUM_OF_BLOCK >= 2) return 3;
+        if constexpr (OES_NUM_OF_BLOCKS >= 8) return 6;
+        if constexpr (OES_NUM_OF_BLOCKS >= 4) return 4;
+        if constexpr (OES_NUM_OF_BLOCKS >= 2) return 3;
         return 2;
     }();
 
@@ -287,8 +287,8 @@ namespace SPHINX {
      * Stores both forward and inverse keys for encryption/decryption
      */
     struct DerivedKeyCache {
-        m_block rk[OES_NUM_OF_BLOCK];      // Forward round keys
-        m_block inv_rk[OES_NUM_OF_BLOCK];  // Inverse round keys
+        m_block rk[OES_NUM_OF_BLOCKS];      // Forward round keys
+        m_block inv_rk[OES_NUM_OF_BLOCKS];  // Inverse round keys
         m_block parity;                     // Global parity value
         m_block inv_parity;                 // Inverse parity
 
@@ -299,7 +299,7 @@ namespace SPHINX {
          * @param num_blocks Number of key blocks to process
          */
         void derive(const m_block *key_blocks, size_t num_blocks) {
-            const size_t n = std::clamp(num_blocks, static_cast<size_t>(1), static_cast<size_t>(OES_NUM_OF_BLOCK));
+            const size_t n = std::clamp(num_blocks, static_cast<size_t>(1), static_cast<size_t>(OES_NUM_OF_BLOCKS));
 
             // Compute global parity from all key blocks
             parity = TF_PARITY;
@@ -311,7 +311,7 @@ namespace SPHINX {
             inv_parity = compute_mod_inverse(parity | 1);
 
             // Derive intermediate values with non-linear mixing
-            m_block d[OES_NUM_OF_BLOCK];
+            m_block d[OES_NUM_OF_BLOCKS];
             for (size_t i = 0; i < n; ++i) {
                 m_block x = key_blocks[i];
                 x ^= mBlock::rotl(x, ROT[0]);
@@ -326,32 +326,32 @@ namespace SPHINX {
             }
 
             // Cross-block mixing for wide configurations
-            if constexpr (OES_NUM_OF_BLOCK > 1) {
-                constexpr size_t mix_rounds = (OES_NUM_OF_BLOCK >= 8) ? 4 : 3;
-                m_block temp[OES_NUM_OF_BLOCK];
+            if constexpr (OES_NUM_OF_BLOCKS > 1) {
+                constexpr size_t mix_rounds = (OES_NUM_OF_BLOCKS >= 8) ? 4 : 3;
+                m_block temp[OES_NUM_OF_BLOCKS];
 
                 for (size_t round = 0; round < mix_rounds; ++round) {
-                    for (size_t i = 0; i < OES_NUM_OF_BLOCK; ++i) {
-                        const size_t i1 = (i + 1) % OES_NUM_OF_BLOCK;
-                        const size_t i2 = (i + OES_NUM_OF_BLOCK / 2) % OES_NUM_OF_BLOCK;
+                    for (size_t i = 0; i < OES_NUM_OF_BLOCKS; ++i) {
+                        const size_t i1 = (i + 1) % OES_NUM_OF_BLOCKS;
+                        const size_t i2 = (i + OES_NUM_OF_BLOCKS / 2) % OES_NUM_OF_BLOCKS;
 
                         temp[i] = d[i] ^ d[i1];
                         temp[i] += mBlock::rotl(d[i1], ROT[round & 7]);
-                        temp[i] *= ((d[i2] ^ RC[(round * OES_NUM_OF_BLOCK + i) % NUM_RC]) | 1);
+                        temp[i] *= ((d[i2] ^ RC[(round * OES_NUM_OF_BLOCKS + i) % NUM_RC]) | 1);
                         temp[i] ^= mBlock::rotr(d[i], ROT[(round + 1) & 7]);
                         temp[i] ^= (temp[i] >> (OES_MEM_SIZE / 2));
                     }
-                    std::memcpy(d, temp, sizeof(m_block) * OES_NUM_OF_BLOCK);
+                    std::memcpy(d, temp, sizeof(m_block) * OES_NUM_OF_BLOCKS);
                 }
             }
 
             // Generate final round keys with chaining
-            for (size_t i = 0; i < OES_NUM_OF_BLOCK; ++i) {
+            for (size_t i = 0; i < OES_NUM_OF_BLOCKS; ++i) {
                 const m_block base = d[i] ^ RC[i % NUM_RC];
                 m_block modifier = parity;
 
-                if constexpr (OES_NUM_OF_BLOCK > 1) {
-                    modifier ^= d[(i + 1) % OES_NUM_OF_BLOCK];
+                if constexpr (OES_NUM_OF_BLOCKS > 1) {
+                    modifier ^= d[(i + 1) % OES_NUM_OF_BLOCKS];
                 }
                 if (i > 0) {
                     modifier ^= rk[i - 1];
@@ -367,11 +367,11 @@ namespace SPHINX {
          * @param key Single key block to expand
          */
         void derive(const m_block key) {
-            m_block expanded[OES_NUM_OF_BLOCK];
-            for (size_t i = 0; i < OES_NUM_OF_BLOCK; ++i) {
+            m_block expanded[OES_NUM_OF_BLOCKS];
+            for (size_t i = 0; i < OES_NUM_OF_BLOCKS; ++i) {
                 expanded[i] = mBlock::rotl(key, (i * 17) % OES_MEM_SIZE) ^ RC[i % NUM_RC];
             }
-            derive(expanded, OES_NUM_OF_BLOCK);
+            derive(expanded, OES_NUM_OF_BLOCKS);
         }
     };
 
@@ -417,7 +417,7 @@ namespace SPHINX {
         size_t block_idx
     ) {
         // Accumulate contribution from ALL right-half blocks
-        m_block acc = dk.rk[round_idx % OES_NUM_OF_BLOCK] ^ RC[round_idx % NUM_RC];
+        m_block acc = dk.rk[round_idx % OES_NUM_OF_BLOCKS] ^ RC[round_idx % NUM_RC];
 
         for (size_t i = 0; i < right_len; ++i) {
             acc ^= mBlock::rotl(right[i], (i * 7 + round_idx * 3) % OES_MEM_SIZE);
@@ -437,14 +437,14 @@ namespace SPHINX {
             uint8_t out_byte = SBOX_FWD[idx];
 
             // Post-mix with key
-            out_byte ^= extract_byte(dk.rk[(round_idx + b) % OES_NUM_OF_BLOCK], b);
+            out_byte ^= extract_byte(dk.rk[(round_idx + b) % OES_NUM_OF_BLOCKS], b);
 
             result = inject_byte(result, b, out_byte);
         }
 
         // Final mixing
         result ^= mBlock::rotl(result, ROT[round_idx & 7]);
-        result *= (dk.rk[(round_idx + block_idx) % OES_NUM_OF_BLOCK] | 1);
+        result *= (dk.rk[(round_idx + block_idx) % OES_NUM_OF_BLOCKS] | 1);
 
         return result;
     }
@@ -462,7 +462,7 @@ namespace SPHINX {
     inline void wide_sbox_layer(m_block *data, size_t len, const DerivedKeyCache &dk, bool inverse) {
         if (!data || len < 2) return;
 
-        const size_t n = std::min(len, static_cast<size_t>(OES_NUM_OF_BLOCK));
+        const size_t n = std::min(len, static_cast<size_t>(OES_NUM_OF_BLOCKS));
         const size_t half = (n + 1) / 2; // Left half size (ceil)
         const size_t right_start = half;
         const size_t right_len = n - half;
@@ -483,7 +483,7 @@ namespace SPHINX {
 
                 // Swap left and right (except after last round)
                 if (r < WIDE_SBOX_ROUNDS - 1) {
-                    m_block temp[OES_NUM_OF_BLOCK];
+                    m_block temp[OES_NUM_OF_BLOCKS];
                     // New left = old right, new right = old left
                     for (size_t i = 0; i < right_len; ++i) {
                         temp[i] = data[right_start + i];
@@ -499,7 +499,7 @@ namespace SPHINX {
             for (size_t r = WIDE_SBOX_ROUNDS; r-- > 0;) {
                 // Undo swap first (except for round 0 which had no preceding swap)
                 if (r < WIDE_SBOX_ROUNDS - 1) {
-                    m_block temp[OES_NUM_OF_BLOCK];
+                    m_block temp[OES_NUM_OF_BLOCKS];
                     // Reverse the swap
                     for (size_t i = 0; i < half; ++i) {
                         temp[i] = data[right_len + i];
@@ -599,7 +599,7 @@ namespace SPHINX {
         }
 
         // Cross-half mixing for wide blocks
-        if (len >= 4 && OES_NUM_OF_BLOCK >= 2) {
+        if (len >= 4 && OES_NUM_OF_BLOCKS >= 2) {
             const size_t half = len / 2;
             for (size_t i = 0; i < half; ++i) {
                 data[i] ^= mBlock::rotl(data[i + half], ROT[2]);
@@ -637,7 +637,7 @@ namespace SPHINX {
         }
 
         // Reverse cross-half mixing
-        if (len >= 4 && OES_NUM_OF_BLOCK >= 2) {
+        if (len >= 4 && OES_NUM_OF_BLOCKS >= 2) {
             const size_t half = len / 2;
             for (size_t i = half; i-- > 0;) {
                 data[i + half] ^= mBlock::rotr(data[i], ROT[3]);
@@ -869,7 +869,7 @@ namespace SPHINX {
      * @return Transformed block
      */
     static inline m_block sbox_forward(m_block x, const DerivedKeyCache &dk, size_t idx) {
-        constexpr size_t n = OES_NUM_OF_BLOCK;
+        constexpr size_t n = OES_NUM_OF_BLOCKS;
         auto rk = [&](size_t off) { return dk.rk[(idx + off) % n]; };
 
         // Round 1-3: Initial mixing
@@ -923,7 +923,7 @@ namespace SPHINX {
      * @return Transformed block
      */
     static inline m_block sbox_inverse(m_block x, const DerivedKeyCache &dk, size_t idx) {
-        constexpr size_t n = OES_NUM_OF_BLOCK;
+        constexpr size_t n = OES_NUM_OF_BLOCKS;
         auto rk = [&](size_t off) { return dk.rk[(idx + off) % n]; };
         auto inv = [&](size_t off) { return dk.inv_rk[(idx + off) % n]; };
 
@@ -1061,7 +1061,7 @@ namespace SPHINX {
         }
 
         // Cross-half mixing for wide configurations
-        if (len >= 8 && OES_NUM_OF_BLOCK >= 4) {
+        if (len >= 8 && OES_NUM_OF_BLOCKS >= 4) {
             const size_t half = len / 2;
             for (size_t i = 0; i < half; ++i) d[i] ^= mBlock::rotl(d[i + half], ROT[6]);
             for (size_t i = 0; i < half; ++i) d[i + half] ^= mBlock::rotr(d[i], ROT[7]);
@@ -1079,7 +1079,7 @@ namespace SPHINX {
         if (!d || len == 0) return;
 
         // Reverse cross-half mixing
-        if (len >= 8 && OES_NUM_OF_BLOCK >= 4) {
+        if (len >= 8 && OES_NUM_OF_BLOCKS >= 4) {
             const size_t half = len / 2;
             for (size_t i = half; i-- > 0;) d[i + half] ^= mBlock::rotr(d[i], ROT[7]);
             for (size_t i = half; i-- > 0;) d[i] ^= mBlock::rotl(d[i + half], ROT[6]);
@@ -1137,7 +1137,7 @@ namespace SPHINX {
 
         // Derive keys for S-box operations
         DerivedKeyCache dk{};
-        dk.derive(rk, std::min(rk_len, static_cast<size_t>(OES_NUM_OF_BLOCK)));
+        dk.derive(rk, std::min(rk_len, static_cast<size_t>(OES_NUM_OF_BLOCKS)));
 
         // 1. Key addition layer
         for (size_t i = 0; i < len; ++i) {
@@ -1163,7 +1163,7 @@ namespace SPHINX {
         // 6. Round constant injection
         data[0] ^= rc;
         if (len > 1) data[len - 1] ^= mBlock::rotl(rc, ROT[0]);
-        if (len >= 4 && OES_NUM_OF_BLOCK >= 4) data[len / 2] ^= mBlock::rotr(rc, ROT[1]);
+        if (len >= 4 && OES_NUM_OF_BLOCKS >= 4) data[len / 2] ^= mBlock::rotr(rc, ROT[1]);
     }
 
     /**
@@ -1186,7 +1186,7 @@ namespace SPHINX {
         // 1. Remove round constants
         data[0] ^= rc;
         if (len > 1) data[len - 1] ^= mBlock::rotl(rc, ROT[0]);
-        if (len >= 4 && OES_NUM_OF_BLOCK >= 4) data[len / 2] ^= mBlock::rotr(rc, ROT[1]);
+        if (len >= 4 && OES_NUM_OF_BLOCKS >= 4) data[len / 2] ^= mBlock::rotr(rc, ROT[1]);
 
         // 2. Inverse Pseudo-Hadamard transform
         for (size_t i = 0; i < len; ++i) {
@@ -1198,7 +1198,7 @@ namespace SPHINX {
 
         // Derive keys for S-box operations
         DerivedKeyCache dk{};
-        dk.derive(rk, std::min(rk_len, static_cast<size_t>(OES_NUM_OF_BLOCK)));
+        dk.derive(rk, std::min(rk_len, static_cast<size_t>(OES_NUM_OF_BLOCKS)));
 
         // 4. Inverse algebraic S-box layer
         for (size_t i = 0; i < len; ++i) {
@@ -1255,16 +1255,16 @@ namespace SPHINX {
         const size_t rk0_len = r_keys[0]->getLen();
         const size_t rkN_len = r_keys[NUM_ROUNDS + 1]->getLen();
 
-        m_block seeds[OES_NUM_OF_BLOCK];
+        m_block seeds[OES_NUM_OF_BLOCKS];
 
         // Initial whitening
         for (size_t i = 0; i < len; ++i) data[i] ^= rk0[i % rk0_len];
 
         // Initial global diffusion
-        for (size_t i = 0; i < OES_NUM_OF_BLOCK; ++i) {
+        for (size_t i = 0; i < OES_NUM_OF_BLOCKS; ++i) {
             seeds[i] = rk0[i % rk0_len] ^ DOMAIN_DIFF ^ RC[i % NUM_RC];
         }
-        global_diffuse(data, len, seeds, OES_NUM_OF_BLOCK);
+        global_diffuse(data, len, seeds, OES_NUM_OF_BLOCKS);
 
         // Main rounds
         for (size_t r = 0; r < NUM_ROUNDS; ++r) {
@@ -1272,10 +1272,10 @@ namespace SPHINX {
         }
 
         // Final global diffusion
-        for (size_t i = 0; i < OES_NUM_OF_BLOCK; ++i) {
+        for (size_t i = 0; i < OES_NUM_OF_BLOCKS; ++i) {
             seeds[i] = rkN[i % rkN_len] ^ DOMAIN_DIFF ^ PHI ^ RC[i % NUM_RC];
         }
-        global_diffuse(data, len, seeds, OES_NUM_OF_BLOCK);
+        global_diffuse(data, len, seeds, OES_NUM_OF_BLOCKS);
 
         // Final whitening
         for (size_t i = 0; i < len; ++i) data[i] ^= rkN[i % rkN_len];
@@ -1324,16 +1324,16 @@ namespace SPHINX {
         const size_t rk0_len = r_keys[0]->getLen();
         const size_t rkN_len = r_keys[NUM_ROUNDS + 1]->getLen();
 
-        m_block seeds[OES_NUM_OF_BLOCK];
+        m_block seeds[OES_NUM_OF_BLOCKS];
 
         // Remove final whitening
         for (size_t i = 0; i < len; ++i) data[i] ^= rkN[i % rkN_len];
 
         // Inverse final diffusion
-        for (size_t i = 0; i < OES_NUM_OF_BLOCK; ++i) {
+        for (size_t i = 0; i < OES_NUM_OF_BLOCKS; ++i) {
             seeds[i] = rkN[i % rkN_len] ^ DOMAIN_DIFF ^ PHI ^ RC[i % NUM_RC];
         }
-        global_diffuse_inv(data, len, seeds, OES_NUM_OF_BLOCK);
+        global_diffuse_inv(data, len, seeds, OES_NUM_OF_BLOCKS);
 
         // Inverse main rounds (in reverse order)
         for (size_t r = NUM_ROUNDS; r-- > 0;) {
@@ -1341,10 +1341,10 @@ namespace SPHINX {
         }
 
         // Inverse initial diffusion
-        for (size_t i = 0; i < OES_NUM_OF_BLOCK; ++i) {
+        for (size_t i = 0; i < OES_NUM_OF_BLOCKS; ++i) {
             seeds[i] = rk0[i % rk0_len] ^ DOMAIN_DIFF ^ RC[i % NUM_RC];
         }
-        global_diffuse_inv(data, len, seeds, OES_NUM_OF_BLOCK);
+        global_diffuse_inv(data, len, seeds, OES_NUM_OF_BLOCKS);
 
         // Remove initial whitening
         for (size_t i = 0; i < len; ++i) data[i] ^= rk0[i % rk0_len];

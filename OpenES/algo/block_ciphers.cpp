@@ -58,7 +58,7 @@ MBLOCK *oes_enc_adv(const MBLOCK *plain, const MBLOCK *key, size_t *session) {
     }
 
     const size_t plainLen = plain->getLen();
-    const size_t cipherLen = closestMultiple(plainLen + 2, OES_NUM_OF_BLOCK);
+    const size_t cipherLen = closestMultiple(plainLen + 2, OES_NUM_OF_BLOCKS);
     size_t ses = session ? *session : 0;
 
     // ========================================================================
@@ -91,11 +91,11 @@ MBLOCK *oes_enc_adv(const MBLOCK *plain, const MBLOCK *key, size_t *session) {
 
     m_block *blocks = data->getDataRef();
 
-    for (size_t i = 0; i < cipherLen; i += OES_NUM_OF_BLOCK) {
-        const size_t blockCount = std::min(static_cast<size_t>(OES_NUM_OF_BLOCK), cipherLen - i);
+    for (size_t i = 0; i < cipherLen; i += OES_NUM_OF_BLOCKS) {
+        const size_t blockCount = std::min(static_cast<size_t>(OES_NUM_OF_BLOCKS), cipherLen - i);
 
         // 3.1 Derive session-specific keys using PBKDF
-        auto sessionKeys = PBKDF(*key, OES_NUM_OF_BLOCK, 1, static_cast<m_block>(ses), 16);
+        auto sessionKeys = PBKDF(*key, OES_NUM_OF_BLOCKS, 1, static_cast<m_block>(ses), 16);
         if (sessionKeys.empty() || !sessionKeys[0]) {
             cleanup_pbkdf_keys(sessionKeys);
             return nullptr;
@@ -167,7 +167,7 @@ MBLOCK *oes_dec_adv(const MBLOCK *cipher, const MBLOCK *key, size_t *session) {
     const size_t initialSession = ses;
 
     // Calculate session after SPHINX encryption phase
-    const size_t numChunks = (cipherLen + OES_NUM_OF_BLOCK - 1) / OES_NUM_OF_BLOCK;
+    const size_t numChunks = (cipherLen + OES_NUM_OF_BLOCKS - 1) / OES_NUM_OF_BLOCKS;
     const size_t postSession = ses + numChunks;
 
     // Clone ciphertext for processing
@@ -193,11 +193,11 @@ MBLOCK *oes_dec_adv(const MBLOCK *cipher, const MBLOCK *key, size_t *session) {
     // Process blocks in forward order with correct session
     size_t currentSession = initialSession;
 
-    for (size_t i = 0; i < cipherLen; i += OES_NUM_OF_BLOCK) {
-        const size_t blockCount = std::min(static_cast<size_t>(OES_NUM_OF_BLOCK), cipherLen - i);
+    for (size_t i = 0; i < cipherLen; i += OES_NUM_OF_BLOCKS) {
+        const size_t blockCount = std::min(static_cast<size_t>(OES_NUM_OF_BLOCKS), cipherLen - i);
 
         // Derive same session keys as encryption using PBKDF
-        auto sessionKeys = PBKDF(*key, OES_NUM_OF_BLOCK, 1, static_cast<m_block>(currentSession), 16);
+        auto sessionKeys = PBKDF(*key, OES_NUM_OF_BLOCKS, 1, static_cast<m_block>(currentSession), 16);
         if (sessionKeys.empty() || !sessionKeys[0]) {
             cleanup_pbkdf_keys(sessionKeys);
             return nullptr;
@@ -281,7 +281,7 @@ MBLOCK *oes_enc_cke(const MBLOCK *plain, const MBLOCK *key, m_block seed) {
     }
 
     const size_t plainLen = plain->getLen();
-    constexpr size_t blockSize = OES_NUM_OF_BLOCK;
+    constexpr size_t blockSize = OES_NUM_OF_BLOCKS;
     const size_t cipherLen = closestMultiple(plainLen + 1, blockSize);
 
     // Pad plaintext
@@ -348,7 +348,7 @@ MBLOCK *oes_dec_cke(const MBLOCK *cipher, const MBLOCK *key, m_block seed) {
     }
 
     const size_t cipherLen = cipher->getLen();
-    constexpr size_t blockSize = OES_NUM_OF_BLOCK;
+    constexpr size_t blockSize = OES_NUM_OF_BLOCKS;
 
     // Allocate plaintext buffer
     std::unique_ptr<MBLOCK> plain(MBLOCK::create(cipherLen, 0));
@@ -433,7 +433,7 @@ MBLOCK *oes_enc_ctr(const MBLOCK *plain, const MBLOCK *key, m_block seed, m_bloc
     }
 
     const size_t plainLen = plain->getLen();
-    constexpr size_t blockSize = OES_NUM_OF_BLOCK;
+    constexpr size_t blockSize = OES_NUM_OF_BLOCKS;
     const size_t cipherLen = closestMultiple(plainLen + 1, blockSize);
 
     // Pad plaintext
@@ -485,7 +485,7 @@ MBLOCK *oes_dec_ctr(const MBLOCK *cipher, const MBLOCK *key, m_block seed, m_blo
     }
 
     const size_t cipherLen = cipher->getLen();
-    constexpr size_t blockSize = OES_NUM_OF_BLOCK;
+    constexpr size_t blockSize = OES_NUM_OF_BLOCKS;
 
     // Allocate plaintext buffer
     std::unique_ptr<MBLOCK> plain(MBLOCK::create(cipherLen, 0));
@@ -545,7 +545,7 @@ MBLOCK *oes_enc_cbc(const MBLOCK *plain, const MBLOCK *key, MBLOCK **iv) {
     }
 
     const size_t plainLen = plain->getLen();
-    constexpr size_t blockSize = OES_NUM_OF_BLOCK;
+    constexpr size_t blockSize = OES_NUM_OF_BLOCKS;
     const size_t cipherLen = closestMultiple(plainLen + 1, blockSize);
 
     // Pad plaintext
@@ -611,7 +611,7 @@ MBLOCK *oes_dec_cbc(const MBLOCK *cipher, const MBLOCK *key, MBLOCK **iv) {
     }
 
     const size_t cipherLen = cipher->getLen();
-    constexpr size_t blockSize = OES_NUM_OF_BLOCK;
+    constexpr size_t blockSize = OES_NUM_OF_BLOCKS;
 
     // Allocate plaintext buffer
     std::unique_ptr<MBLOCK> plain(MBLOCK::create(cipherLen, 0));
@@ -688,7 +688,7 @@ MBLOCK *oes_enc_ecb(const MBLOCK *plain, const MBLOCK *key) {
     }
 
     const size_t plainLen = plain->getLen();
-    constexpr size_t blockSize = OES_NUM_OF_BLOCK;
+    constexpr size_t blockSize = OES_NUM_OF_BLOCKS;
     const size_t cipherLen = closestMultiple(plainLen + 1, blockSize);
 
     // Pad plaintext
@@ -733,7 +733,7 @@ MBLOCK *oes_dec_ecb(const MBLOCK *cipher, const MBLOCK *key) {
     }
 
     const size_t cipherLen = cipher->getLen();
-    constexpr size_t blockSize = OES_NUM_OF_BLOCK;
+    constexpr size_t blockSize = OES_NUM_OF_BLOCKS;
 
     // Allocate plaintext buffer
     std::unique_ptr<MBLOCK> plain(MBLOCK::create(cipherLen, 0));

@@ -7,12 +7,12 @@
 
 class OES {
 protected:
-    MBLOCK* oKey = nullptr;
-    MBLOCK* wKey = nullptr;
+    MBLOCK *oKey = nullptr;
+    MBLOCK *wKey = nullptr;
 
-    MBLOCK* plainBlock = nullptr;
-    MBLOCK* cipherBlock = nullptr;
-    MBLOCK* IV = nullptr;
+    MBLOCK *plainBlock = nullptr;
+    MBLOCK *cipherBlock = nullptr;
+    MBLOCK *IV = nullptr;
 
     m_block ctrCounter = 0;
     m_block ckeStreamData = static_cast<m_block>(DEFAULT_CKE_STREAM_INITIALIZER);
@@ -24,27 +24,33 @@ public:
     bool streamMode = false;
 
     OES();
+
     ~OES();
 
     OES(const OES &) = delete;
+
     OES &operator=(const OES &) = delete;
 
     OES(OES &&other) noexcept;
+
     OES &operator=(OES &&other) noexcept;
 
     void set_key(char *keyString);
 
     void deriveWKey(const char *keySalt, size_t length = 10);
 
-    void extendWKey(size_t strength = 16, m_block salt = MASK_TO_BLOCK_SIZE(0x9e3779b97f4a7c15ULL, 0x7f4a7c159e3779b9ULL));
+    void extendWKey(size_t strength = 16,
+                    m_block salt = MASK_TO_BLOCK_SIZE(0x9e3779b97f4a7c15ULL, 0x7f4a7c159e3779b9ULL));
 
     OES *load_data_raw(void *data, size_t length = 0);
 
     OES *load_cipher_data_raw(void *data, size_t length);
 
-    OES *load_cipher_block(MBLOCK* data, bool take_ownership = false);
+    OES *load_cipher_block(MBLOCK *data, bool take_ownership = false);
 
     [[nodiscard]] std::pair<void *, size_t> get_data() const;
+
+    [[nodiscard]] std::pair<void *, size_t> get_cipher_data() const;
 
     void resetBlocks();
 

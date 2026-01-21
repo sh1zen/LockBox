@@ -1,10 +1,8 @@
-#ifndef LOCKBOX_RAW_LAYER_H
-#define LOCKBOX_RAW_LAYER_H
+#pragma once
 
 #include "m_block.h"
 
 namespace mBlock {
-
     inline m_block rotr(const m_block seed, size_t r) noexcept {
         r &= OES_MEM_SIZE_MASK;
         return (seed >> r) | (seed << ((OES_MEM_SIZE - r) & OES_MEM_SIZE_MASK));
@@ -26,6 +24,3 @@ namespace mBlock {
     template<typename T>
     void dump(T x, const char *label = "m_block");
 }
-
-
-#endif //LOCKBOX_RAW_LAYER_H

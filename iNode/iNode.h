@@ -1,140 +1,230 @@
 #pragma once
 
-#include <string>
-#include <memory>
-#include <functional>
-#include <vector>
-#include <OpenES/OES.h>
 #include "Block.h"
+#include "inode_raw.h"
 
-// Function pointer type for walker callbacks
-using WalkerCallback = std::function<void(Block*, const std::string&, class iNode*)>;
+class OES;
 
 class iNode {
 public:
-    // Constructor: opens existing iNode file or creates new one
-    // If path ends with .sc, opens existing lockbox
-    // Otherwise creates new lockbox at path/lockbox.sc
-    iNode(const std::string& path, OES* cipherEngine = nullptr);
-    ~iNode();
-
-    // === Core Operations ===
-
-    // Display entire tree structure
-    void display() const;
-
-    // Save iNode metadata
-    void save();
-
-    // Export entire iNode to filesystem
-    void exportTo(const std::string& exportPath);
-
-    // Close the iNode file
-    void close_inode();
-
-    // === File/Directory Operations ===
-
-    // Add file to iNode (encrypts if cipherEngine present)
-    off64_t addFile(const std::string& internalPath, const char* data, size_t size);
-
-    // Add directory to iNode
-    off64_t addDirectory(const std::string& internalPath);
-
-    // Remove file from iNode
-    bool removeFile(const std::string& internalPath);
-
-    // Remove directory (must be empty)
-    bool removeDirectory(const std::string& internalPath);
-
-    // Read file content (decrypts if cipherEngine present)
-    std::pair<char*, size_t> readFile(const std::string& internalPath);
-
-    // Update existing file content
-    bool updateFile(const std::string& internalPath, const char* data, size_t size);
-
-    // Check if path exists
-    bool exists(const std::string& internalPath, bool isFile) const;
-
-    // Search for file/directory
-    Block* findBlock(const std::string& internalPath, bool isFile) const;
-
-    // === Traversal Operations ===
-
-    // Walk tree with callback for each entry
-    void walk(const std::string& startPath, WalkerCallback callback);
-    void walk(WalkerCallback callback); // From root
-
-    // Count subdirectories in a path
-    unsigned int countSubdirs(const std::string& path) const;
-
-    // Count files in a path
-    unsigned int countFiles(const std::string& path) const;
-
-    // === Builder Function (Static) ===
-
-    // Build iNode from filesystem directory/file
-    static std::unique_ptr<iNode> buildFromFilesystem(
-        const std::string& fsPath,
-        const std::string& inodePath,
-        OES* cipherEngine = nullptr
-    );
-
-private:
-    std::unique_ptr<Block> root;
-    int lockbox;
-    OES* cipherEngine;
-    std::string filePath;
-
-    // Fragmentation management
-    struct FragmentInfo {
-        off64_t position;
+    struct DirEntry {
+        std::string name; // Decrypted name for display
+        std::string encryptedName; // Raw stored name
+        bool isFile;
         size_t size;
     };
-    std::vector<FragmentInfo> freeList;
 
-    // === Low-level IO ===
-    size_t getLockboxSize() const;
-    off64_t allocateSpace(size_t size);
-    void freeSpace(off64_t pos, size_t size);
-    void defragment(); // Slide content after modification
+    struct Stats {
+        size_t totalSize;
+        size_t usedSpace;
+        size_t freeSpace;
+        size_t dirCount;
+        size_t fileCount;
+    };
 
-    bool write(const void* buf, off64_t pos, size_t size);
-    bool read(off64_t pos, void* buf, size_t size) const;
+    using WalkCallback = std::function<void(Block *, const std::string &, iNode *)>;
 
-    // === Block Operations ===
-    bool readBlock(off64_t offset, Block* block) const;
-    off64_t insertBlock(Block* block);
-    bool updateBlock(Block* block);
-    bool deleteBlock(off64_t pos);
+    // ═══════════════════════════════════════════════════════════════════════
+    // LIFECYCLE
+    // ═══════════════════════════════════════════════════════════════════════
+    explicit iNode(const std::string &path, OES *engine = nullptr);
 
-    // === Navigation ===
-    Block* navigateToPath(const std::string& path, bool createIfMissing, bool isFile) const;
-    std::pair<Block*, Block*> findBlockAndParent(const std::string& path, bool isFile) const;
+    ~iNode();
 
-    // === Internal Helpers ===
-    off64_t createDirectoryChain(const std::string& path);
-    off64_t createFileBlock(const std::string& name, const char* data, size_t size, off64_t parentPos);
-    bool unlinkBlock(Block* block);
+    // Non-copyable
+    iNode(const iNode &) = delete;
 
-    // Walker implementation
-    void walkRecursive(off64_t blockPos, int level, const std::string& currentPath, WalkerCallback callback);
+    iNode &operator=(const iNode &) = delete;
 
-    // Filesystem scanner for builder
-    void scanFilesystem(const std::string& fsPath, const std::string& internalPath);
+    // ═══════════════════════════════════════════════════════════════════════
+    // FILE OPERATIONS (Plain paths)
+    // ═══════════════════════════════════════════════════════════════════════
 
-    // Encryption helpers
-    std::pair<char*, size_t> encryptData(const char* data, size_t size);
-    std::pair<char*, size_t> decryptData(const char* data, size_t size);
+    size_t addFile(const std::string &plainPath, const char *data, size_t size);
 
-    // Static callbacks for common operations
-    static void displayCallback(Block* block, const std::string& path, iNode* node);
-    static void exportCallback(Block* block, const std::string& path, iNode* node);
+    std::pair<char *, size_t> readFile(const std::string &plainPath);
 
-    // Utility
-    Block* cloneBlock(const Block* src) const;
-    std::string normalizePath(const std::string& path) const;
+    bool updateFile(const std::string &plainPath, const char *data, size_t size);
 
-    // Disable copy
-    iNode(const iNode&) = delete;
-    iNode& operator=(const iNode&) = delete;
+    bool removeFile(const std::string &plainPath);
+
+    size_t importFile(const std::string &plainPath, const std::string &externalPath);
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // DIRECTORY OPERATIONS (Plain paths)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    size_t addDirectory(const std::string &plainPath);
+
+    bool removeDirectory(const std::string &plainPath, bool force = false);
+
+    bool removeDirectoryRecursive(const std::string &plainPath);
+
+    std::vector<DirEntry> listDirectory(const std::string &plainPath) const;
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // COMMON OPERATIONS (Plain paths)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    bool exists(const std::string &plainPath, bool isFile) const;
+
+    bool rename(const std::string &plainPath, const std::string &newPlainName);
+
+    bool move(const std::string &srcPlainPath, const std::string &destPlainPath);
+
+    bool copy(const std::string &srcPlainPath, const std::string &destPlainPath);
+
+    bool remove(const std::string &plainPath);
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // SEARCH & TRAVERSAL
+    // ═══════════════════════════════════════════════════════════════════════
+
+    std::vector<std::string> search(const std::string &name, bool caseSensitive = false);
+
+    void walk(WalkCallback callback);
+
+    void walk(const std::string &startPlainPath, WalkCallback callback);
+
+    size_t countSubdirs(const std::string &plainPath) const;
+
+    size_t countFiles(const std::string &plainPath) const;
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // DISPLAY & STATS
+    // ═══════════════════════════════════════════════════════════════════════
+
+    void display() const;
+
+    Stats getStats() const;
+
+    void printStats() const;
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // EXPORT & PERSISTENCE
+    // ═══════════════════════════════════════════════════════════════════════
+
+    void save();
+
+    void exportTo(const std::string &exportPath);
+
+    void exportTo(const std::string &exportPath, const std::string &internalPlainPath);
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // BUILDER & IMPORT
+    // ═══════════════════════════════════════════════════════════════════════
+
+    static std::unique_ptr<iNode> buildFromFilesystem(const std::string &fsPath,
+                                                      const std::string &inodePath,
+                                                      OES *cipherEngine = nullptr);
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // MAINTENANCE & ACCESSORS
+    // ═══════════════════════════════════════════════════════════════════════
+
+    bool defragment();
+
+    const std::string &getFilePath() const;
+
+    OES *getCipherEngine() const;
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // LEGACY/COMPATIBILITY (deprecated - use plain path versions)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    Block *findBlock(const std::string &path, bool isFile) const;
+
+    Block *findParent(const std::string &path) const;
+
+private:
+    // ═══════════════════════════════════════════════════════════════════════
+    // INTERNAL BLOCK OPERATIONS
+    // ═══════════════════════════════════════════════════════════════════════
+
+    void syncRoot() const;
+
+    std::unique_ptr<Block> readBlockAt(size_t pos) const;
+
+    std::unique_ptr<Block> cloneRoot() const;
+
+    size_t insertBlock(Block *block);
+
+    bool updateBlock(Block *block);
+
+    bool deleteBlock(Block *block);
+
+    bool unlinkBlock(Block *block);
+
+    // Block finding (uses plain paths, Block handles encryption internally)
+    std::unique_ptr<Block> findBlockByPath(const std::string &plainPath, bool isFile) const;
+
+    std::unique_ptr<Block> findParentByPath(const std::string &plainPath) const;
+
+    // Directory chain creation
+    size_t ensureDirChain(const std::string &plainPath);
+
+    size_t createFileBlock(const std::string &plainName, const char *encData,
+                           size_t encSize, size_t parentPos);
+
+    // File data operations
+    std::pair<std::unique_ptr<char[]>, size_t> readFileData(Block *block) const;
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // DATA ENCRYPTION (for file content only)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    std::pair<char *, size_t> encryptData(const char *data, size_t size) const;
+
+    std::pair<char *, size_t> decryptData(const char *data, size_t size) const;
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // PATH UTILITIES
+    // ═══════════════════════════════════════════════════════════════════════
+
+    std::string normalizePath(const std::string &path) const;
+
+    std::string getParentPath(const std::string &path) const;
+
+    std::string getFileName(const std::string &path) const;
+
+    std::string toLower(const std::string &str) const;
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // COPY HELPERS
+    // ═══════════════════════════════════════════════════════════════════════
+
+    bool copyFile(const std::string &srcPlainPath, const std::string &destPlainPath);
+
+    bool copyDirectoryRecursive(const std::string &srcPlainPath, const std::string &destPlainPath);
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // EXPORT HELPERS
+    // ═══════════════════════════════════════════════════════════════════════
+
+    void exportRecursive(size_t pos, const std::string &destPath);
+
+    void exportSingleFile(Block *block, const std::string &destPath);
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // FILESYSTEM SCAN
+    // ═══════════════════════════════════════════════════════════════════════
+
+    void scanFilesystem(const std::string &fsPath, const std::string &internalPlainPath);
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // WALK HELPER
+    // ═══════════════════════════════════════════════════════════════════════
+
+    void walkRecursiveInternal(size_t pos, uint32_t level,
+                               const std::string &currentPlainPath,
+                               WalkCallback callback);
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // MEMBER VARIABLES
+    // ═══════════════════════════════════════════════════════════════════════
+
+    std::unique_ptr<Block> root_;
+    mutable inode_raw storage_;
+    OES *cipher_;
+    std::string path_;
 };

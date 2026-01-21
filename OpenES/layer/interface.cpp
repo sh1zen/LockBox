@@ -1,231 +1,248 @@
-#include <cstdio>
 #include <cstdlib>
-#include <utility>
+#include <new>
 
 #include <OpenES/layer/raw-layer.h>
 #include <OpenES/support/base64/base64.h>
 #include "interface.h"
 #include "support.h"
 
+// Lookup table for byte -> 2 hex chars (precomputed)
+static const char hex_lut[256][2] = {
+    {'0', '0'}, {'0', '1'}, {'0', '2'}, {'0', '3'}, {'0', '4'}, {'0', '5'}, {'0', '6'}, {'0', '7'},
+    {'0', '8'}, {'0', '9'}, {'0', 'a'}, {'0', 'b'}, {'0', 'c'}, {'0', 'd'}, {'0', 'e'}, {'0', 'f'},
+    {'1', '0'}, {'1', '1'}, {'1', '2'}, {'1', '3'}, {'1', '4'}, {'1', '5'}, {'1', '6'}, {'1', '7'},
+    {'1', '8'}, {'1', '9'}, {'1', 'a'}, {'1', 'b'}, {'1', 'c'}, {'1', 'd'}, {'1', 'e'}, {'1', 'f'},
+    {'2', '0'}, {'2', '1'}, {'2', '2'}, {'2', '3'}, {'2', '4'}, {'2', '5'}, {'2', '6'}, {'2', '7'},
+    {'2', '8'}, {'2', '9'}, {'2', 'a'}, {'2', 'b'}, {'2', 'c'}, {'2', 'd'}, {'2', 'e'}, {'2', 'f'},
+    {'3', '0'}, {'3', '1'}, {'3', '2'}, {'3', '3'}, {'3', '4'}, {'3', '5'}, {'3', '6'}, {'3', '7'},
+    {'3', '8'}, {'3', '9'}, {'3', 'a'}, {'3', 'b'}, {'3', 'c'}, {'3', 'd'}, {'3', 'e'}, {'3', 'f'},
+    {'4', '0'}, {'4', '1'}, {'4', '2'}, {'4', '3'}, {'4', '4'}, {'4', '5'}, {'4', '6'}, {'4', '7'},
+    {'4', '8'}, {'4', '9'}, {'4', 'a'}, {'4', 'b'}, {'4', 'c'}, {'4', 'd'}, {'4', 'e'}, {'4', 'f'},
+    {'5', '0'}, {'5', '1'}, {'5', '2'}, {'5', '3'}, {'5', '4'}, {'5', '5'}, {'5', '6'}, {'5', '7'},
+    {'5', '8'}, {'5', '9'}, {'5', 'a'}, {'5', 'b'}, {'5', 'c'}, {'5', 'd'}, {'5', 'e'}, {'5', 'f'},
+    {'6', '0'}, {'6', '1'}, {'6', '2'}, {'6', '3'}, {'6', '4'}, {'6', '5'}, {'6', '6'}, {'6', '7'},
+    {'6', '8'}, {'6', '9'}, {'6', 'a'}, {'6', 'b'}, {'6', 'c'}, {'6', 'd'}, {'6', 'e'}, {'6', 'f'},
+    {'7', '0'}, {'7', '1'}, {'7', '2'}, {'7', '3'}, {'7', '4'}, {'7', '5'}, {'7', '6'}, {'7', '7'},
+    {'7', '8'}, {'7', '9'}, {'7', 'a'}, {'7', 'b'}, {'7', 'c'}, {'7', 'd'}, {'7', 'e'}, {'7', 'f'},
+    {'8', '0'}, {'8', '1'}, {'8', '2'}, {'8', '3'}, {'8', '4'}, {'8', '5'}, {'8', '6'}, {'8', '7'},
+    {'8', '8'}, {'8', '9'}, {'8', 'a'}, {'8', 'b'}, {'8', 'c'}, {'8', 'd'}, {'8', 'e'}, {'8', 'f'},
+    {'9', '0'}, {'9', '1'}, {'9', '2'}, {'9', '3'}, {'9', '4'}, {'9', '5'}, {'9', '6'}, {'9', '7'},
+    {'9', '8'}, {'9', '9'}, {'9', 'a'}, {'9', 'b'}, {'9', 'c'}, {'9', 'd'}, {'9', 'e'}, {'9', 'f'},
+    {'a', '0'}, {'a', '1'}, {'a', '2'}, {'a', '3'}, {'a', '4'}, {'a', '5'}, {'a', '6'}, {'a', '7'},
+    {'a', '8'}, {'a', '9'}, {'a', 'a'}, {'a', 'b'}, {'a', 'c'}, {'a', 'd'}, {'a', 'e'}, {'a', 'f'},
+    {'b', '0'}, {'b', '1'}, {'b', '2'}, {'b', '3'}, {'b', '4'}, {'b', '5'}, {'b', '6'}, {'b', '7'},
+    {'b', '8'}, {'b', '9'}, {'b', 'a'}, {'b', 'b'}, {'b', 'c'}, {'b', 'd'}, {'b', 'e'}, {'b', 'f'},
+    {'c', '0'}, {'c', '1'}, {'c', '2'}, {'c', '3'}, {'c', '4'}, {'c', '5'}, {'c', '6'}, {'c', '7'},
+    {'c', '8'}, {'c', '9'}, {'c', 'a'}, {'c', 'b'}, {'c', 'c'}, {'c', 'd'}, {'c', 'e'}, {'c', 'f'},
+    {'d', '0'}, {'d', '1'}, {'d', '2'}, {'d', '3'}, {'d', '4'}, {'d', '5'}, {'d', '6'}, {'d', '7'},
+    {'d', '8'}, {'d', '9'}, {'d', 'a'}, {'d', 'b'}, {'d', 'c'}, {'d', 'd'}, {'d', 'e'}, {'d', 'f'},
+    {'e', '0'}, {'e', '1'}, {'e', '2'}, {'e', '3'}, {'e', '4'}, {'e', '5'}, {'e', '6'}, {'e', '7'},
+    {'e', '8'}, {'e', '9'}, {'e', 'a'}, {'e', 'b'}, {'e', 'c'}, {'e', 'd'}, {'e', 'e'}, {'e', 'f'},
+    {'f', '0'}, {'f', '1'}, {'f', '2'}, {'f', '3'}, {'f', '4'}, {'f', '5'}, {'f', '6'}, {'f', '7'},
+    {'f', '8'}, {'f', '9'}, {'f', 'a'}, {'f', 'b'}, {'f', 'c'}, {'f', 'd'}, {'f', 'e'}, {'f', 'f'}
+};
 
-std::pair<void *, size_t> exportBlock(MBLOCK *block, int mode) {
-    if (!block || block->isNull()) {
-        return std::make_pair(nullptr, 0);
-    }
+// Lookup table for hex char -> nibble (255 = invalid)
+// Index is ASCII value, value is nibble (0-15) or 255 if invalid
+static const uint8_t unhex_lut[256] = {
+    //  0    1    2    3    4    5    6    7    8    9    A    B    C    D    E    F
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, // 0x00-0x0F
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, // 0x10-0x1F
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    // 0x20-0x2F (space, !"#$%&'()*+,-./)
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 255, 255, 255, 255, 255, 255, // 0x30-0x3F ('0'-'9' at 0x30-0x39)
+    255, 10, 11, 12, 13, 14, 15, 255, 255, 255, 255, 255, 255, 255, 255, 255, // 0x40-0x4F ('A'-'F' at 0x41-0x46)
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, // 0x50-0x5F
+    255, 10, 11, 12, 13, 14, 15, 255, 255, 255, 255, 255, 255, 255, 255, 255, // 0x60-0x6F ('a'-'f' at 0x61-0x66)
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, // 0x70-0x7F
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, // 0x80-0x8F
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, // 0x90-0x9F
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, // 0xA0-0xAF
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, // 0xB0-0xBF
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, // 0xC0-0xCF
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, // 0xD0-0xDF
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, // 0xE0-0xEF
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255 // 0xF0-0xFF
+};
 
-    switch (mode) {
-        case OES_EXPORT_HEX: {
-            return oes_export_block_to_hex_string(block);
-        }
-
-        case OES_EXPORT_UINT8: {
-            return block->toBytes();
-        }
-
-        case OES_EXPORT_CHAR: {
-            return oes_export_block_to_string(block);
-        }
-
-        case OES_EXPORT_BASE64: {
-            return oes_export_block_to_base64(block);
-        }
-
-        case OES_EXPORT_RAW:
-        default: {
-            size_t blockLen = block->getLen();
-            auto *copy = static_cast<m_block *>(malloc(blockLen * sizeof(m_block)));
-            if (!copy) {
-                return std::make_pair(nullptr, 0);
-            }
-            for (size_t i = 0; i < blockLen; i++) {
-                copy[i] = block->getBlock(i);
-            }
-            return std::make_pair(copy, blockLen);
-        }
+// Convert m_block to hex using LUT (big-endian output)
+static inline void m_block_to_hex(m_block val, char *out) {
+    for (int i = OES_BYTES_X_BLOCK - 1; i >= 0; --i) {
+        const auto byte = static_cast<uint8_t>(val >> (i * 8));
+        out[0] = hex_lut[byte][0];
+        out[1] = hex_lut[byte][1];
+        out += 2;
     }
 }
 
-/**
- * Export OES_BLOCK to null-terminated string
- *
- * @param block OES_BLOCK to export
- * @return Pair of (null-terminated string, length including null terminator) - caller must free
- */
+// Convert hex to m_block using LUT (returns false on invalid char)
+static inline bool hex_to_m_block(const char *hex, m_block &out) {
+    m_block val = 0;
+    // Process 2 hex chars per byte, OES_BYTES_X_BLOCK bytes total
+    // Input is big-endian (MSB first), so first byte goes to highest position
+    for (size_t i = 0; i < OES_BYTES_X_BLOCK; ++i) {
+        const uint8_t hi = unhex_lut[static_cast<uint8_t>(hex[i * 2])];
+        const uint8_t lo = unhex_lut[static_cast<uint8_t>(hex[i * 2 + 1])];
+        if ((hi | lo) & 0x80) return false;
+        const uint8_t byte = (hi << 4) | lo;
+        // Place byte at correct position (big-endian: first byte = MSB)
+        val |= static_cast<m_block>(byte) << ((OES_BYTES_X_BLOCK - 1 - i) * 8);
+    }
+    out = val;
+    return true;
+}
+
 std::pair<char *, size_t> oes_export_block_to_string(MBLOCK *block) {
-    if (!block || block->isNull()) {
-        return std::make_pair(nullptr, 0);
-    }
+    if (!block || block->isNull()) return {nullptr, 0};
 
-    // Converti senza byte extra
-    auto [raw_bytes, raw_len] = block->toBytes();
-    if (!raw_bytes || raw_len == 0) {
-        return std::make_pair(nullptr, 0);
-    }
+    auto [raw, len] = block->toBytes();
+    if (!raw) return {nullptr, 0};
 
-    // Alloca nuova memoria con spazio per il null terminator
-    size_t total_size = raw_len + 1;
-    auto result = static_cast<char*>(malloc(total_size * sizeof(char)));
+    auto result = static_cast<char *>(malloc(len + 1));
     if (!result) {
-        secure_memzero(raw_bytes, raw_len);
-        free(raw_bytes);
-        return std::make_pair(nullptr, 0);
+        secure_memzero(raw, len);
+        free(raw);
+        return {nullptr, 0};
     }
 
-    // Copia i dati e aggiungi null terminator
-    memcpy(result, raw_bytes, raw_len);
-    result[raw_len] = '\0';
+    memcpy(result, raw, len);
+    result[len] = '\0';
 
-    // Pulisci il buffer temporaneo
-    secure_memzero(raw_bytes, raw_len);
-    free(raw_bytes);
+    secure_memzero(raw, len);
+    free(raw);
 
-    return std::make_pair(result, total_size);
+    return {result, len + 1};
 }
 
-/**
- * Export OES_BLOCK to Base64-encoded string
- *
- * @param block OES_BLOCK to export
- * @return Pair of (Base64 string, length including null terminator) - caller must free
- */
 std::pair<char *, size_t> oes_export_block_to_base64(MBLOCK *block) {
-    if (block->isNull()) {
-        return std::make_pair(nullptr, 0);
-    }
+    if (!block || block->isNull()) return {nullptr, 0};
 
-    std::pair<uint8_t *, size_t> converted = block->toBytes();
-    if (!converted.first || converted.second == 0) {
-        return std::make_pair(nullptr, 0);
-    }
+    auto [bytes, len] = block->toBytes();
+    if (!bytes) return {nullptr, 0};
 
-    auto b64 = base64_encode(converted.first, converted.second);
+    auto result = base64_encode(bytes, len);
 
-    // Clean up temporary buffer
-    secure_memzero(converted.first, converted.second);
-    free(converted.first);
+    secure_memzero(bytes, len);
+    free(bytes);
 
-    if (!b64.first) {
-        return std::make_pair(nullptr, 0);
-    }
-
-    return b64;
+    return result;
 }
 
-/**
- * Export OES_BLOCK to hexadecimal string
- *
- * @param block OES_BLOCK to export
- * @return Pair of (Hex string, length including null terminator) - caller must free
- */
 std::pair<char *, size_t> oes_export_block_to_hex_string(MBLOCK *block) {
-    if (block->isNull()) {
-        return std::make_pair(nullptr, 0);
-    }
+    if (!block || block->isNull()) return {nullptr, 0};
 
-    // Calculate output length: 2 hex chars per byte + null terminator
-    size_t outLen = 2 * OES_BYTES_X_BLOCK * block->getLen() + 1;
+    const size_t count = block->getLen();
+    constexpr size_t chars_per_block = 2 * OES_BYTES_X_BLOCK;
+    const size_t out_len = chars_per_block * count + 1;
 
-    auto output = static_cast<char *>(malloc(outLen * sizeof(char)));
-    if (!output) {
-        return std::make_pair(nullptr, 0);
-    }
+    char *output = static_cast<char *>(malloc(out_len));
+    if (!output) return {nullptr, 0};
 
     char *ptr = output;
-
-    // Convert each m_block to hex string
-    for (size_t i = 0; i < block->getLen(); i++) {
-#if OES_LOGIC_BLOCK_SIZE == 32
-        int written = snprintf(ptr, outLen - (ptr - output), "%08x", static_cast<uint32_t>(block->getBlock(i)));
-#elif OES_LOGIC_BLOCK_SIZE == 64
-        int written = snprintf(ptr, outLen - (ptr - output), "%016lx", static_cast<uint64_t>(block->getBlock(i)));
-#else
-        // Generic implementation for arbitrary sizes
-        int written = snprintf(ptr, outLen - (ptr - output), "%0*lx",
-                               static_cast<int>(2 * OES_BYTES_X_BLOCK),
-                               static_cast<unsigned long>(block->getBlock(i)));
-#endif
-
-        if (written < 0 || written >= static_cast<int>(outLen - (ptr - output))) {
-            // Overflow or error
-            free(output);
-            return std::make_pair(nullptr, 0);
-        }
-
-        ptr += written;
+    for (size_t i = 0; i < count; ++i) {
+        m_block_to_hex(block->getBlock(i), ptr);
+        ptr += chars_per_block;
     }
-
     *ptr = '\0';
 
-    return std::make_pair(output, outLen);
+    return {output, out_len};
 }
 
-/**
- * Create OES_BLOCK from hex string
- *
- * @param hexString Hexadecimal string
- * @return OES_BLOCK structure (caller must free with unset_block)
- */
-MBLOCK *oes_import_block_from_hex_string(const char *hexString) {
-    if (!hexString) {
-        return nullptr;
-    }
+MBLOCK *oes_import_block_from_hex_string(const char *hex) {
+    if (!hex) return nullptr;
 
-    size_t hexLen = strlen(hexString);
-    if (hexLen == 0 || hexLen % (2 * OES_BYTES_X_BLOCK) != 0) {
-        return nullptr;
-    }
+    const size_t hex_len = strlen(hex);
+    constexpr size_t chars_per_block = 2 * OES_BYTES_X_BLOCK;
 
-    size_t blockCount = hexLen / (2 * OES_BYTES_X_BLOCK);
+    if (hex_len == 0 || hex_len % chars_per_block != 0) return nullptr;
 
-    auto data = new m_block[blockCount];
+    const size_t count = hex_len / chars_per_block;
+    auto *data = new(std::nothrow) m_block[count];
+    if (!data) return nullptr;
 
-    // Parse hex string into m_blocks
-    for (size_t i = 0; i < blockCount; i++) {
-        const char *hexBlock = hexString + i * (2 * OES_BYTES_X_BLOCK);
-
-#if OES_LOGIC_BLOCK_SIZE == 32
-        if (sscanf(hexBlock, "%8x", reinterpret_cast<uint32_t *>(&data[i])) != 1) {
-#elif OES_LOGIC_BLOCK_SIZE == 64
-            if (sscanf(hexBlock, "%16lx", reinterpret_cast<uint64_t *>(&data[i])) != 1) {
-#else
-            char fmt[16];
-            snprintf(fmt, sizeof(fmt), "%%%dlx", static_cast<int>(2 * OES_BYTES_X_BLOCK));
-            if (sscanf(hexBlock, fmt, reinterpret_cast<unsigned long *>(&data[i])) != 1) {
-#endif
+    for (size_t i = 0; i < count; ++i) {
+        if (!hex_to_m_block(hex + i * chars_per_block, data[i])) {
             delete[] data;
             return nullptr;
         }
     }
 
-    // Create MBLOCK with ownership transfer (no copy)
-    auto block = new MBLOCK(data, blockCount, true);
+    return new MBLOCK(data, count, true);
+}
+
+MBLOCK *oes_import_block_from_base64(const char *b64) {
+    if (!b64) return nullptr;
+
+    auto [decoded, len] = base64_decode(b64, strlen(b64));
+    if (!decoded) return nullptr;
+
+    MBLOCK *block = MBLOCK::fromBytes(decoded, len);
+
+    secure_memzero(decoded, len);
+    free(decoded);
 
     return block;
 }
 
+std::pair<void *, size_t> exportBlock(MBLOCK *block, int mode) {
+    if (!block || block->isNull()) return {nullptr, 0};
 
-/**
- * Create OES_BLOCK from Base64 string
- *
- * @param base64String Base64-encoded string
- * @return OES_BLOCK structure (caller must free with unset_block)
- */
-MBLOCK *oes_import_block_from_base64(const char *base64String) {
-    if (!base64String) {
-        return nullptr;
+    switch (mode) {
+        case OES_TYPE_HEX:
+            return oes_export_block_to_hex_string(block);
+
+        case OES_TYPE_UINT8:
+            return block->toBytes();
+
+        case OES_TYPE_RAW_UINT8:
+            return block->toBytes_raw();
+
+        case OES_TYPE_CHAR:
+            return oes_export_block_to_string(block);
+
+        case OES_EXPORT_BASE64:
+            return oes_export_block_to_base64(block);
+
+        case OES_TYPE_RAW:
+        default: {
+            const size_t count = block->getLen();
+            const size_t bytes = count * sizeof(m_block);
+            auto copy = static_cast<m_block *>(malloc(bytes));
+            if (!copy) return {nullptr, 0};
+
+            // Direct copy if MBLOCK stores contiguously, else element-wise
+            for (size_t i = 0; i < count; ++i) {
+                copy[i] = block->getBlock(i);
+            }
+            return {copy, count};
+        }
     }
+}
 
-    auto [decoded, decodedLen] = base64_decode(base64String, strlen(base64String));
-    if (!decoded || decodedLen == 0) {
-        return nullptr;
+MBLOCK *importBlock(const void *data, size_t len, int mode) {
+    if (!data) return nullptr;
+
+    switch (mode) {
+        case OES_TYPE_HEX:
+            return oes_import_block_from_hex_string(static_cast<const char *>(data));
+
+        case OES_TYPE_UINT8:
+            return MBLOCK::fromBytes(data, len);
+
+        case OES_TYPE_CHAR:
+            return MBLOCK::fromBytes(data, len > 0 ? len - 1 : 0);
+
+        case OES_EXPORT_BASE64:
+            return oes_import_block_from_base64(static_cast<const char *>(data));
+
+        case OES_TYPE_RAW:
+        default: {
+            if (len == 0) return nullptr;
+            const size_t bytes = len * sizeof(m_block);
+            auto *copy = new(std::nothrow) m_block[len];
+            if (!copy) return nullptr;
+            memcpy(copy, data, bytes);
+            return new MBLOCK(copy, len, true);
+        }
     }
-
-    // Use MBLOCK::fromBytes to convert byte array to MBLOCK
-    MBLOCK *block = MBLOCK::fromBytes(decoded, decodedLen);
-
-    // Clean up temporary buffer
-    secure_memzero(decoded, decodedLen);
-    free(decoded);
-
-    return block;
 }

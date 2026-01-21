@@ -1,5 +1,6 @@
 #include <OpenES/support/oes-exception.h>
 #include "raw-layer.h"
+#include "m_block.h"
 
 namespace mBlock {
     /**

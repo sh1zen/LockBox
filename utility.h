@@ -8,8 +8,6 @@ using namespace std;
 
 uint32_t countOccurrences(void **elements, size_t elemsNro, size_t memory_size);
 
-// lockbox
-bool is_lockbox(string &path);
 
 // general
 void handle_error(const char *msg, int code);

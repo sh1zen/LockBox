@@ -1,37 +1,86 @@
-#ifndef INODE_RAW_H
-#define INODE_RAW_H
+#pragma once
 
 #include <string>
+#include <vector>
+#include <utility>
 
-using namespace std;
+#include "Block.h"
 
-#define PATH_SIZE 512
+class inode_raw {
+public:
+    // Costante per posizione non valida
+    static constexpr size_t NPOS = static_cast<size_t>(-1);
 
-typedef struct inode_st *iNode;
+    // ====================== Lifecycle ======================
+    inode_raw();
 
-/**
- * inizializza un inode con un direttorio passato come parametro
- **/
-iNode inode_init(string &path, char *cipher);
+    ~inode_raw();
 
-/**
- * legge un inode da file
- **/
-iNode inode_load(string &path, char *cipher);
+    // Non copiabile, ma movibile
+    inode_raw(const inode_raw &) = delete;
 
-/**
- * visualiza un'inode a schermo
- **/
-void inode_display(iNode st);
+    inode_raw &operator=(const inode_raw &) = delete;
 
-/**
- * recreate the Dir structure from inode
- **/
-void inode_build(iNode st, string inode_path);
+    inode_raw(inode_raw &&other) noexcept;
 
-/**
- * save the current iNode
- */
-void inode_close(iNode st);
+    inode_raw &operator=(inode_raw &&other) noexcept;
 
-#endif // INODE_RAW_H
+    // ====================== File Operations ======================
+    bool open(const std::string &path);
+
+    bool create(const std::string &path);
+
+    void close();
+
+    [[nodiscard]] bool isOpen() const;
+
+    [[nodiscard]] const std::string &getPath() const;
+
+    // ====================== Size & Space ======================
+    [[nodiscard]] size_t getFileSize() const;
+
+    [[nodiscard]] bool resize(size_t newSize) const;
+
+    size_t allocate(size_t size);
+
+    void free(size_t pos, size_t size);
+
+    [[nodiscard]] size_t getFreeSpace() const;
+
+    [[nodiscard]] size_t getFragmentCount() const;
+
+    // ====================== Raw I/O ======================
+    bool write(size_t pos, const void *data, size_t size) const;
+
+    bool read(size_t pos, void *data, size_t size) const;
+
+    // ====================== Block I/O ======================
+    bool readBlock(size_t pos, Block *block) const;
+
+    bool writeBlock(size_t pos, const Block *block) const;
+
+    size_t appendBlock(const Block *block);
+
+    // Modifica un blocco in-place con una callback
+    template<typename Func>
+    bool modifyBlock(size_t pos, Func &&modifier) {
+        Block block;
+        if (!readBlock(pos, &block)) return false;
+        std::forward<Func>(modifier)(&block);
+        return writeBlock(pos, &block);
+    }
+
+    // ====================== Free List Management ======================
+    void defragmentFreeList();
+
+    [[nodiscard]] const std::vector<std::pair<size_t, size_t> > &getFreeList() const;
+
+private:
+    int fd_;
+    std::string path_;
+    std::vector<std::pair<size_t, size_t> > freeList_; // {pos, size}
+
+    size_t findFreeSpace(size_t size);
+
+    void mergeFreeList();
+};

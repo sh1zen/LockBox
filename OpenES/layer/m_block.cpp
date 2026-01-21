@@ -4,8 +4,7 @@
 #include "support.h"
 
 // ========== ROTAZIONE VETTORE DI BLOCCHI ==========
-
-void MBLOCK::rotl(size_t i) {
+void MBLOCK::rotl(size_t i) const {
     if (len <= 1 || i == 0) return;
     i %= len;
     if (i == 0) return;
@@ -15,7 +14,7 @@ void MBLOCK::rotl(size_t i) {
     mBlock::reverse_range(data, data + len);
 }
 
-void MBLOCK::rotr(size_t i) {
+void MBLOCK::rotr(size_t i) const {
     if (len <= 1 || i == 0) return;
     i %= len;
     if (i == 0) return;
@@ -24,7 +23,7 @@ void MBLOCK::rotr(size_t i) {
 
 // ========== OPERAZIONI XOR ==========
 
-void MBLOCK::xor_with(const MBLOCK &other, bool alternate) {
+void MBLOCK::xor_with(const MBLOCK &other, bool alternate) const {
     const size_t n = (len < other.len) ? len : other.len;
     if (n == 0) return;
 
@@ -122,7 +121,7 @@ void MBLOCK::dump(bool printable) const {
 
 // ========== BLOCK ACCESS ==========
 
-bool MBLOCK::setBlock(size_t pos, m_block value) {
+bool MBLOCK::setBlock(size_t pos, m_block value) const {
     if (pos >= len || !data) return false;
     data[pos] = value;
     return true;
@@ -218,14 +217,14 @@ void MBLOCK::extend(size_t new_len, m_block fill) {
     len = new_len;
 }
 
-void MBLOCK::secure_zero() {
+void MBLOCK::secure_zero() const {
     if (data && len > 0) {
         secure_memzero(data, len * sizeof(m_block));
     }
 }
 
 // ========== CONVERSION METHODS ==========
-
+__attribute__((noinline))
 MBLOCK *MBLOCK::fromBytes(const void *src, const size_t nByte) {
     if (!src || nByte == 0) return nullptr;
 
@@ -247,6 +246,65 @@ MBLOCK *MBLOCK::fromBytes(const void *src, const size_t nByte) {
         out[pos] = (out[pos] << (padding * 8)) | padding;
     } else {
         out[blocks - 1] = static_cast<m_block>(OES_BYTES_X_BLOCK);
+    }
+
+    return new MBLOCK(out, blocks, true);
+}
+
+__attribute__((noinline))
+MBLOCK *MBLOCK::fromBytes_raw(const void *src, const size_t nByte) {
+    if (!src || nByte == 0) return nullptr;
+
+    // I dati cifrati DEVONO essere multiplo della dimensione del blocco
+    if (nByte % OES_BYTES_X_BLOCK != 0) {
+        return nullptr;
+    }
+
+    const size_t blocks = nByte / OES_BYTES_X_BLOCK;
+    auto *out = new m_block[blocks]();
+
+    const auto *bytes = static_cast<const uint8_t *>(src);
+
+    for (size_t i = 0; i < blocks; ++i) {
+        const size_t pos = i * OES_BYTES_X_BLOCK;
+        m_block block = 0;
+
+#if OES_BYTES_X_BLOCK == 1
+        block = bytes[pos];
+#elif OES_BYTES_X_BLOCK == 2
+        block = (static_cast<m_block>(bytes[pos]) << 8) |
+                static_cast<m_block>(bytes[pos + 1]);
+#elif OES_BYTES_X_BLOCK == 4
+        block = (static_cast<m_block>(bytes[pos]) << 24) |
+                (static_cast<m_block>(bytes[pos + 1]) << 16) |
+                (static_cast<m_block>(bytes[pos + 2]) << 8) |
+                static_cast<m_block>(bytes[pos + 3]);
+#elif OES_BYTES_X_BLOCK == 8
+        block = (static_cast<m_block>(bytes[pos]) << 56) |
+                (static_cast<m_block>(bytes[pos + 1]) << 48) |
+                (static_cast<m_block>(bytes[pos + 2]) << 40) |
+                (static_cast<m_block>(bytes[pos + 3]) << 32) |
+                (static_cast<m_block>(bytes[pos + 4]) << 24) |
+                (static_cast<m_block>(bytes[pos + 5]) << 16) |
+                (static_cast<m_block>(bytes[pos + 6]) << 8) |
+                static_cast<m_block>(bytes[pos + 7]);
+#elif OES_BYTES_X_BLOCK == 16
+        // Per __int128: costruisci dalle due metà
+        m_block high = 0, low = 0;
+        for (int j = 0; j < 8; j++) {
+            high = (high << 8) | static_cast<m_block>(bytes[pos + j]);
+        }
+        for (int j = 0; j < 8; j++) {
+            low = (low << 8) | static_cast<m_block>(bytes[pos + 8 + j]);
+        }
+        block = (high << 64) | low;
+#else
+        // Fallback generico
+        for (size_t j = 0; j < OES_BYTES_X_BLOCK; j++) {
+            block = (block << 8) | static_cast<m_block>(bytes[pos + j]);
+        }
+#endif
+        out[i] = block;
     }
 
     return new MBLOCK(out, blocks, true);
@@ -292,6 +350,7 @@ std::pair<uint8_t *, size_t> MBLOCK::toBytes_raw(const size_t extraSize) const {
     return {converted, outLen};
 }
 
+__attribute__((noinline))
 std::pair<uint8_t *, size_t> MBLOCK::toBytes() const {
     if (!data || len == 0) return {nullptr, 0};
 

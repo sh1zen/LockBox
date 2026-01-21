@@ -1,89 +1,139 @@
 #pragma once
 
-#include <cstdint>
-#include <type_traits>
+#include <memory>
 
-// Maximum name length for files and directories
-#define MAX_NAME_LENGTH 256
+class OES;
 
-/**
- * Block structure representing both files and directories in the iNode filesystem
- *
- * This is a fixed-size structure that can be directly written to/read from disk.
- * Using fixed-size arrays instead of pointers for disk persistence.
- */
 class Block {
 public:
-    // ====================== Data Members ======================
+    // Inline buffer per nomi corti (ottimizzazione cache)
+    static constexpr size_t INLINE_NAME_SIZE = 64;
 
-    // Name of the file or directory (fixed size for disk storage)
-    char name[MAX_NAME_LENGTH];
+    // ====================== Data Members (mmap-compatible layout) ======================
 
-    // Type identification
-    bool isFile;                    // true if file, false if directory
+    // Nome: se name_len <= INLINE_NAME_SIZE, stored inline
+    //       se name_len > INLINE_NAME_SIZE, name_inline contiene offset nell'area nomi
+    char name_inline[INLINE_NAME_SIZE]{};
+    size_t name_len{}; // Lunghezza reale del nome (encrypted)
+    size_t name_offset{}; // Offset nell'area nomi esterni (0 se inline)
 
-    // Counters (for directories only)
-    uint32_t files_n;              // Number of files in this directory
-    uint32_t folders_n;            // Number of subdirectories in this directory
+    bool isFile{};
+    size_t files_n{};
+    size_t folders_n{};
+    size_t current{};
+    size_t parent{};
+    size_t subdir_pos{};
+    size_t data_pos{};
+    size_t size{};
+    size_t next{};
+    size_t previous{};
+    size_t level{};
+    char _padding[4]{};
 
-    // Position references (offsets in lockbox file)
-    int64_t current;               // Position of this block in lockbox
-    int64_t parent;                // Position of parent directory block
+    // ====================== Lifecycle ======================
+    Block() noexcept;
 
-    // Directory-specific positions
-    int64_t subdir_pos;            // Position of first subdirectory (for directories)
-
-    // File-specific data
-    int64_t data_pos;              // Position of actual file data (for files)
-                                   // OR position of first file in directory (for directories)
-    uint64_t size;                 // Size of file data in bytes (for files only)
-
-    // Linked list pointers (for siblings in same directory)
-    int64_t next;                  // Next sibling (file or directory)
-    int64_t previous;              // Previous sibling
-
-    // Tree depth
-    uint32_t level;                // Depth in directory tree (root = 0)
-
-    // Padding to ensure consistent size (optional, for alignment)
-    char _padding[4];
-
-    // ====================== Methods ======================
-
-    Block();
     ~Block();
 
-    // Reset all fields to default values
-    void reset();
+    Block(const Block &) = delete;
 
-    // Set the name (with bounds checking)
-    void setName(const char* newName);
+    Block &operator=(const Block &) = delete;
 
-    // Get the name
-    const char* getName() const;
+    Block(Block &&) noexcept = default;
 
-    // Check if this block represents a file
-    bool isFileBlock() const;
+    Block &operator=(Block &&) noexcept = default;
 
-    // Check if this block represents a directory
-    bool isDirectoryBlock() const;
+    // ====================== External Name Storage ======================
+    // Deve essere impostato dal filesystem manager che gestisce mmap
+    using NameResolver = std::string(*)(size_t offset, size_t len, void *ctx);
+    using NameWriter = size_t(*)(std::string_view data, void *ctx); // ritorna offset
 
-    // Copy from another block (deep copy)
-    void copyFrom(const Block* other);
+    static void setNameResolver(NameResolver resolver, void *ctx) noexcept;
 
-    // Print block information (for debugging)
+    static void setNameWriter(NameWriter writer, void *ctx) noexcept;
+
+    // ====================== Cipher Engine ======================
+    static void setCipherEngine(OES *engine) noexcept;
+
+    [[nodiscard]] static OES *getCipherEngine() noexcept;
+
+    // ====================== Name Management (API invariata) ======================
+    void setName(const char *plainName);
+
+    void setName(std::string_view plainName);
+
+    [[nodiscard]] std::string getPlainName() const;
+
+    [[nodiscard]] const char *getRawName() const noexcept; // Solo per nomi inline!
+
+    [[nodiscard]] bool nameEquals(const char *plainName) const;
+
+    [[nodiscard]] bool nameEquals(std::string_view plainName) const;
+
+    // Nuovi metodi utili
+    [[nodiscard]] bool isNameInline() const noexcept;
+
+    [[nodiscard]] size_t getNameLength() const noexcept;
+
+    // ====================== Core Methods ======================
+    void reset() noexcept;
+
+    [[nodiscard]] bool isFileBlock() const noexcept;
+
+    [[nodiscard]] bool isDirectoryBlock() const noexcept;
+
+    void copyFrom(const Block *other) noexcept;
+
     void print() const;
 
-    // Validation
-    bool isValid() const;
+    [[nodiscard]] bool isValid() const noexcept;
+
+    // ====================== Factory & Clone ======================
+    [[nodiscard]] std::unique_ptr<Block> clone() const;
+
+    [[nodiscard]] static std::unique_ptr<Block> createFile(const char *plainName, size_t fileSize,
+                                                           size_t parentPos, size_t dataPos, size_t depth);
+
+    [[nodiscard]] static std::unique_ptr<Block> createDirectory(const char *plainName,
+                                                                size_t parentPos, size_t depth);
+
+    [[nodiscard]] static std::unique_ptr<Block> createRoot();
+
+    // ====================== Tree Utilities ======================
+    [[nodiscard]] bool isRoot() const noexcept;
+
+    [[nodiscard]] bool isLeaf() const noexcept;
+
+    [[nodiscard]] bool hasChildren() const noexcept;
+
+    [[nodiscard]] bool hasSiblings() const noexcept;
+
+    [[nodiscard]] size_t getTotalEntries() const noexcept;
+
+    // ====================== Linking Helpers ======================
+    void linkAfter(Block *predecessor) noexcept;
+
+    void linkBefore(Block *successor) noexcept;
+
+    void unlink() noexcept;
+
+    // ====================== Comparison ======================
+    [[nodiscard]] bool equals(const Block *other) const noexcept;
 
 private:
-    // Disable dynamic allocation for name to ensure fixed size
-    // This makes the structure suitable for direct disk I/O
+    static OES *s_cipher;
+    static NameResolver s_nameResolver;
+    static NameWriter s_nameWriter;
+    static void *s_resolverCtx;
+    static void *s_writerCtx;
+
+    [[nodiscard]] static std::string encryptName(std::string_view plainName);
+
+    [[nodiscard]] static std::string decryptName(std::string_view encName);
+
+    // Recupera nome criptato (inline o esterno)
+    [[nodiscard]] std::string getStoredName() const;
+
+    // Salva nome criptato (sceglie inline o esterno)
+    void storeName(std::string_view encryptedName);
 };
-
-// Helper to calculate block size at compile time
-static_assert(sizeof(Block) > 0, "Block must have non-zero size");
-
-// Ensure Block is suitable for direct disk I/O (no virtual functions, no dynamic allocation)
-static_assert(std::is_standard_layout<Block>::value, "Block must be standard layout for disk I/O");

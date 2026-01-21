@@ -1,352 +1,303 @@
-#include "Block.h"
-#include <cstdlib>
-#include <cstring>
 #include <iostream>
 #include <iomanip>
 
-// ====================== Constructor / Destructor ======================
+#include "Block.h"
+#include "OES.h"
+#include "interface.h"
 
-Block::Block() {
-    // Initialize all fields to zero/default
-    reset();
+// ====================== Static Members ======================
+OES *Block::s_cipher = nullptr;
+Block::NameResolver Block::s_nameResolver = nullptr;
+Block::NameWriter Block::s_nameWriter = nullptr;
+void *Block::s_resolverCtx = nullptr;
+void *Block::s_writerCtx = nullptr;
+
+// ====================== Constructor / Destructor ======================
+Block::Block() noexcept { reset(); }
+
+Block::~Block() = default;
+
+// ====================== External Name Storage ======================
+void Block::setNameResolver(NameResolver resolver, void *ctx) noexcept {
+    s_nameResolver = resolver;
+    s_resolverCtx = ctx;
 }
 
-Block::~Block() {
-    // No dynamic memory to free since we use fixed-size array
-    // This is intentional for disk I/O compatibility
+void Block::setNameWriter(NameWriter writer, void *ctx) noexcept {
+    s_nameWriter = writer;
+    s_writerCtx = ctx;
+}
+
+// ====================== Cipher Engine ======================
+void Block::setCipherEngine(OES *engine) noexcept { s_cipher = engine; }
+OES *Block::getCipherEngine() noexcept { return s_cipher; }
+
+// ====================== Name Storage Internals ======================
+bool Block::isNameInline() const noexcept {
+    return name_offset == 0 && name_len <= INLINE_NAME_SIZE;
+}
+
+size_t Block::getNameLength() const noexcept { return name_len; }
+
+std::string Block::getStoredName() const {
+    if (name_len == 0) return {};
+
+    if (isNameInline()) {
+        return std::string(name_inline, name_len);
+    }
+
+    // Nome esterno: usa resolver
+    if (s_nameResolver) [[likely]] {
+        return s_nameResolver(name_offset, name_len, s_resolverCtx);
+    }
+    return {};
+}
+
+void Block::storeName(std::string_view encryptedName) {
+    name_len = encryptedName.length();
+
+    if (name_len == 0) {
+        name_inline[0] = '\0';
+        name_offset = 0;
+        return;
+    }
+
+    if (name_len <= INLINE_NAME_SIZE) {
+        // Inline storage
+        std::memcpy(name_inline, encryptedName.data(), name_len);
+        if (name_len < INLINE_NAME_SIZE) {
+            name_inline[name_len] = '\0'; // Null-terminate se c'è spazio
+        }
+        name_offset = 0;
+    } else {
+        // External storage
+        if (s_nameWriter) [[likely]] {
+            name_offset = s_nameWriter(encryptedName, s_writerCtx);
+            std::memset(name_inline, 0, INLINE_NAME_SIZE);
+        } else {
+            // Fallback: tronca (non dovrebbe succedere in produzione)
+            std::memcpy(name_inline, encryptedName.data(), INLINE_NAME_SIZE);
+            name_len = INLINE_NAME_SIZE;
+            name_offset = 0;
+        }
+    }
+}
+
+// ====================== Name Encryption/Decryption ======================
+std::string Block::encryptName(std::string_view plainName) {
+    if (!s_cipher || plainName.empty()) [[unlikely]]
+            return std::string(plainName);
+    try {
+        s_cipher->resetBlocks();
+        s_cipher->load_data_raw(const_cast<char *>(plainName.data()), plainName.length());
+        s_cipher->enc_adv();
+        auto *cb = s_cipher->get_cipherBlock();
+        if (!cb || cb->isNull()) [[unlikely]]
+                return std::string(plainName);
+        auto [exp, len] = exportBlock(cb, OES_TYPE_CHAR);
+        if (!exp || len == 0) [[unlikely]]
+                return std::string(plainName);
+        std::string result(static_cast<char *>(exp), len);
+        free(exp);
+        return result;
+    } catch (...) { return std::string(plainName); }
+}
+
+std::string Block::decryptName(std::string_view encName) {
+    if (!s_cipher || encName.length() < 2) [[unlikely]]
+            return std::string(encName);
+    try {
+        auto *ib = importBlock(encName.data(), encName.length(), OES_TYPE_CHAR);
+        if (!ib) [[unlikely]] return std::string(encName);
+
+        s_cipher->resetBlocks();
+        s_cipher->load_cipher_block(ib, true);
+        s_cipher->dec_adv();
+
+        auto *pb = s_cipher->get_plainBlock();
+        if (!pb || pb->isNull()) [[unlikely]]
+                return std::string(encName);
+
+        auto [bytes, len] = pb->toBytes();
+        if (!bytes || len == 0) [[unlikely]]
+                return std::string(encName);
+
+        std::string result(reinterpret_cast<char *>(bytes), len);
+        delete[] bytes;
+        return result;
+    } catch (...) { return std::string(encName); }
+}
+
+// ====================== Name Management (API pubblica invariata) ======================
+void Block::setName(const char *plainName) {
+    if (!plainName) [[unlikely]] {
+        storeName({});
+        return;
+    }
+    setName(std::string_view(plainName, std::strlen(plainName)));
+}
+
+void Block::setName(std::string_view plainName) {
+    if (plainName.empty()) [[unlikely]] {
+        storeName({});
+        return;
+    }
+    std::string encrypted = encryptName(plainName);
+    storeName(encrypted);
+}
+
+std::string Block::getPlainName() const {
+    std::string stored = getStoredName();
+    if (stored.empty()) return {};
+    return decryptName(stored);
+}
+
+const char *Block::getRawName() const noexcept {
+    // Backward compatibility: ritorna buffer inline
+    // Attenzione: per nomi esterni, questo è vuoto/invalido!
+    return name_inline;
+}
+
+bool Block::nameEquals(const char *plainName) const {
+    return plainName && getPlainName() == plainName;
+}
+
+bool Block::nameEquals(std::string_view plainName) const {
+    return getPlainName() == plainName;
 }
 
 // ====================== Core Methods ======================
-
-void Block::reset() {
-    // Clear name
-    memset(name, 0, MAX_NAME_LENGTH);
-
-    // Reset type
-    isFile = false;
-
-    // Reset counters
-    files_n = 0;
-    folders_n = 0;
-
-    // Reset positions
-    current = 0;
-    parent = 0;
-    subdir_pos = 0;
-    data_pos = 0;
-    size = 0;
-
-    // Reset linked list pointers
-    next = 0;
-    previous = 0;
-
-    // Reset depth
-    level = 0;
-
-    // Clear padding
-    memset(_padding, 0, sizeof(_padding));
+void Block::reset() noexcept {
+    std::memset(this, 0, sizeof(Block));
 }
 
-void Block::setName(const char* newName) {
-    if (newName == nullptr) {
-        name[0] = '\0';
-        return;
-    }
+bool Block::isFileBlock() const noexcept { return isFile; }
+bool Block::isDirectoryBlock() const noexcept { return !isFile; }
 
-    // Copy name with bounds checking
-    size_t len = strlen(newName);
-    if (len >= MAX_NAME_LENGTH) {
-        len = MAX_NAME_LENGTH - 1;
-    }
-
-    memcpy(name, newName, len);
-    name[len] = '\0';
-}
-
-const char* Block::getName() const {
-    return name;
-}
-
-bool Block::isFileBlock() const {
-    return isFile;
-}
-
-bool Block::isDirectoryBlock() const {
-    return !isFile;
-}
-
-void Block::copyFrom(const Block* other) {
-    if (other == nullptr) {
-        return;
-    }
-
-    // Deep copy all fields
-    memcpy(this, other, sizeof(Block));
+void Block::copyFrom(const Block *other) noexcept {
+    if (other) [[likely]] std::memcpy(this, other, sizeof(Block));
 }
 
 void Block::print() const {
-    std::cout << "╔════════════════════════════════════════════════════════════════════╗\n";
-    std::cout << "║                           BLOCK INFO                               ║\n";
-    std::cout << "╠════════════════════════════════════════════════════════════════════╣\n";
+    const auto pn = getPlainName();
+    const bool inl = isNameInline();
 
-    std::cout << "║ Name:          " << std::left << std::setw(50) << name << " ║\n";
-    std::cout << "║ Type:          " << std::left << std::setw(50)
-              << (isFile ? "FILE" : "DIRECTORY") << " ║\n";
-    std::cout << "║ Current Pos:   " << std::left << std::setw(50) << current << " ║\n";
-    std::cout << "║ Parent Pos:    " << std::left << std::setw(50) << parent << " ║\n";
-    std::cout << "║ Level:         " << std::left << std::setw(50) << level << " ║\n";
-
+    std::cout << "╔════════════════════════════════════════════════════════════════════╗\n"
+            "║                           BLOCK INFO                               ║\n"
+            "╠════════════════════════════════════════════════════════════════════╣\n"
+            << "║ Name (plain):  " << std::left << std::setw(50) << pn << " ║\n"
+            << "║ Name length:   " << std::left << std::setw(50) << name_len << " ║\n"
+            << "║ Name storage:  " << std::left << std::setw(50)
+            << (inl ? "INLINE" : "EXTERNAL @" + std::to_string(name_offset)) << " ║\n"
+            << "║ Type:          " << std::left << std::setw(50)
+            << (isFile ? "FILE" : "DIRECTORY") << " ║\n"
+            << "║ Current Pos:   " << std::left << std::setw(50) << current << " ║\n"
+            << "║ Parent Pos:    " << std::left << std::setw(50) << parent << " ║\n"
+            << "║ Level:         " << std::left << std::setw(50) << level << " ║\n"
+            "╠════════════════════════════════════════════════════════════════════╣\n";
     if (isFile) {
-        std::cout << "╠════════════════════════════════════════════════════════════════════╣\n";
-        std::cout << "║ FILE SPECIFIC:                                                     ║\n";
-        std::cout << "║ Data Pos:      " << std::left << std::setw(50) << data_pos << " ║\n";
-        std::cout << "║ Size:          " << std::left << std::setw(50) << size << " ║\n";
+        std::cout << "║ FILE SPECIFIC:                                                     ║\n"
+                << "║ Data Pos:      " << std::left << std::setw(50) << data_pos << " ║\n"
+                << "║ Size:          " << std::left << std::setw(50) << size << " ║\n";
     } else {
-        std::cout << "╠════════════════════════════════════════════════════════════════════╣\n";
-        std::cout << "║ DIRECTORY SPECIFIC:                                                ║\n";
-        std::cout << "║ Subdir Pos:    " << std::left << std::setw(50) << subdir_pos << " ║\n";
-        std::cout << "║ Data Pos:      " << std::left << std::setw(50) << data_pos << " ║\n";
-        std::cout << "║ Files:         " << std::left << std::setw(50) << files_n << " ║\n";
-        std::cout << "║ Folders:       " << std::left << std::setw(50) << folders_n << " ║\n";
+        std::cout << "║ DIRECTORY SPECIFIC:                                                ║\n"
+                << "║ Subdir Pos:    " << std::left << std::setw(50) << subdir_pos << " ║\n"
+                << "║ Data Pos:      " << std::left << std::setw(50) << data_pos << " ║\n"
+                << "║ Files:         " << std::left << std::setw(50) << files_n << " ║\n"
+                << "║ Folders:       " << std::left << std::setw(50) << folders_n << " ║\n";
     }
-
-    std::cout << "╠════════════════════════════════════════════════════════════════════╣\n";
-    std::cout << "║ LINKED LIST:                                                       ║\n";
-    std::cout << "║ Next:          " << std::left << std::setw(50) << next << " ║\n";
-    std::cout << "║ Previous:      " << std::left << std::setw(50) << previous << " ║\n";
-
-    std::cout << "╚════════════════════════════════════════════════════════════════════╝\n";
+    std::cout << "╠════════════════════════════════════════════════════════════════════╣\n"
+            "║ LINKED LIST:                                                       ║\n"
+            << "║ Next:          " << std::left << std::setw(50) << next << " ║\n"
+            << "║ Previous:      " << std::left << std::setw(50) << previous << " ║\n"
+            "╚════════════════════════════════════════════════════════════════════╝\n";
 }
 
-bool Block::isValid() const {
-    // Basic validation checks
-
-    // Name should be null-terminated
-    bool nameValid = false;
-    for (size_t i = 0; i < MAX_NAME_LENGTH; i++) {
-        if (name[i] == '\0') {
-            nameValid = true;
-            break;
-        }
-    }
-    if (!nameValid) {
+bool Block::isValid() const noexcept {
+    // Verifica coerenza nome
+    if (name_len > 0 && name_len > INLINE_NAME_SIZE && name_offset == 0)
         return false;
-    }
 
-    // File-specific validation
-    if (isFile) {
-        // Files should not have subdirectories
-        if (subdir_pos != 0) {
-            return false;
-        }
-
-        // Files should not have folder counts
-        if (folders_n != 0) {
-            return false;
-        }
-
-        // Files should have valid size if they have data
-        if (data_pos > 0 && size == 0) {
-            return false; // File with data should have size > 0
-        }
-    } else {
-        // Directories should not have file size
-        if (size != 0) {
-            return false;
-        }
-    }
-
-    // Linked list consistency
-    if (next < 0 || previous < 0) {
-        return false;
-    }
-
-    // Position values should be non-negative
-    if (current < 0 || parent < 0 || subdir_pos < 0 || data_pos < 0) {
-        return false;
-    }
-
-    return true;
+    if (isFile)
+        return subdir_pos == 0 && folders_n == 0 && !(data_pos > 0 && size == 0);
+    return size == 0;
 }
 
-// ====================== Static Helper Functions ======================
+// ====================== Factory & Clone ======================
+std::unique_ptr<Block> Block::clone() const {
+    auto copy = std::make_unique<Block>();
+    std::memcpy(copy.get(), this, sizeof(Block));
+    return copy;
+}
 
-namespace BlockHelper {
+std::unique_ptr<Block> Block::createFile(const char *plainName, size_t fileSize,
+                                         size_t parentPos, size_t dataPos, size_t depth) {
+    auto b = std::make_unique<Block>();
+    b->setName(plainName);
+    b->isFile = true;
+    b->parent = parentPos;
+    b->data_pos = dataPos;
+    b->size = fileSize;
+    b->level = depth;
+    return b;
+}
 
-    /**
-     * Create a new file block
-     */
-    Block* createFileBlock(const char* fileName, uint64_t fileSize,
-                          int64_t parentPos, int64_t dataPos, uint32_t depth) {
-        Block* block = new Block();
-        block->setName(fileName);
-        block->isFile = true;
-        block->parent = parentPos;
-        block->data_pos = dataPos;
-        block->size = fileSize;
-        block->level = depth;
-        return block;
-    }
+std::unique_ptr<Block> Block::createDirectory(const char *plainName, size_t parentPos, size_t depth) {
+    auto b = std::make_unique<Block>();
+    b->setName(plainName);
+    b->isFile = false;
+    b->parent = parentPos;
+    b->level = depth;
+    return b;
+}
 
-    /**
-     * Create a new directory block
-     */
-    Block* createDirectoryBlock(const char* dirName, int64_t parentPos, uint32_t depth) {
-        Block* block = new Block();
-        block->setName(dirName);
-        block->isFile = false;
-        block->parent = parentPos;
-        block->level = depth;
-        return block;
-    }
+std::unique_ptr<Block> Block::createRoot() {
+    auto b = std::make_unique<Block>();
+    std::memcpy(b->name_inline, "root", 5);
+    b->name_len = 4;
+    b->name_offset = 0;
+    b->isFile = false;
+    return b;
+}
 
-    /**
-     * Calculate total size of block structure
-     */
-    size_t getBlockSize() {
-        return sizeof(Block);
-    }
+// ====================== Tree Utilities ======================
+bool Block::isRoot() const noexcept {
+    return level == 0 && parent == 0 && name_len == 4 &&
+           std::memcmp(name_inline, "root", 4) == 0;
+}
 
-    /**
-     * Check if two blocks are equivalent (deep comparison)
-     */
-    bool areEqual(const Block* a, const Block* b) {
-        if (a == nullptr || b == nullptr) {
-            return a == b;
-        }
+bool Block::isLeaf() const noexcept {
+    return isFile || (subdir_pos == 0 && data_pos == 0);
+}
 
-        return memcmp(a, b, sizeof(Block)) == 0;
-    }
+bool Block::hasChildren() const noexcept {
+    return !isFile && (subdir_pos | data_pos);
+}
 
-    /**
-     * Clone a block (deep copy)
-     */
-    Block* clone(const Block* source) {
-        if (source == nullptr) {
-            return nullptr;
-        }
+bool Block::hasSiblings() const noexcept { return next | previous; }
 
-        Block* copy = new Block();
-        copy->copyFrom(source);
-        return copy;
-    }
+size_t Block::getTotalEntries() const noexcept {
+    return isFile ? 0 : files_n + folders_n;
+}
 
-    /**
-     * Initialize a root block
-     */
-    void initializeRoot(Block* block) {
-        if (block == nullptr) {
-            return;
-        }
+// ====================== Linking Helpers ======================
+void Block::linkAfter(Block *pred) noexcept {
+    if (!pred) [[unlikely]] return;
+    previous = pred->current;
+    next = pred->next;
+    pred->next = current;
+}
 
-        block->reset();
-        block->setName("root");
-        block->isFile = false;
-        block->level = 0;
-        block->parent = 0;
-    }
+void Block::linkBefore(Block *succ) noexcept {
+    if (!succ) [[unlikely]] return;
+    next = succ->current;
+    previous = succ->previous;
+    succ->previous = current;
+}
 
-    /**
-     * Print block in compact format
-     */
-    void printCompact(const Block* block) {
-        if (block == nullptr) {
-            std::cout << "[NULL BLOCK]" << std::endl;
-            return;
-        }
+void Block::unlink() noexcept { previous = next = 0; }
 
-        std::cout << (block->isFile ? "📄" : "📁") << " " << block->name << " ";
-
-        if (block->isFile) {
-            std::cout << "(" << block->size << " bytes)";
-        } else {
-            std::cout << "[" << block->folders_n << " dirs, "
-                      << block->files_n << " files]";
-        }
-
-        std::cout << " @" << block->current
-                  << " L" << block->level << std::endl;
-    }
-
-    /**
-     * Validate block integrity
-     */
-    bool validateIntegrity(const Block* block, bool verbose = false) {
-        if (block == nullptr) {
-            if (verbose) std::cerr << "Block is NULL" << std::endl;
-            return false;
-        }
-
-        if (!block->isValid()) {
-            if (verbose) std::cerr << "Block validation failed" << std::endl;
-            return false;
-        }
-
-        // Additional integrity checks
-        if (block->isFile) {
-            if (block->data_pos > 0 && block->size == 0) {
-                if (verbose) std::cerr << "File has data position but zero size" << std::endl;
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    /**
-     * Calculate memory footprint of block
-     */
-    size_t getMemoryFootprint() {
-        return sizeof(Block);
-    }
-
-    /**
-     * Get human-readable type string
-     */
-    const char* getTypeString(const Block* block) {
-        if (block == nullptr) {
-            return "NULL";
-        }
-        return block->isFile ? "FILE" : "DIRECTORY";
-    }
-
-    /**
-     * Check if block is root
-     */
-    bool isRoot(const Block* block) {
-        if (block == nullptr) {
-            return false;
-        }
-
-        return block->level == 0 &&
-               block->parent == 0 &&
-               strcmp(block->name, "root") == 0;
-    }
-
-    /**
-     * Check if block is leaf (no children)
-     */
-    bool isLeaf(const Block* block) {
-        if (block == nullptr) {
-            return false;
-        }
-
-        if (block->isFile) {
-            return true; // Files are always leaves
-        }
-
-        return block->subdir_pos == 0 && block->data_pos == 0;
-    }
-
-    /**
-     * Get total entries count (files + folders)
-     */
-    uint32_t getTotalEntries(const Block* block) {
-        if (block == nullptr || block->isFile) {
-            return 0;
-        }
-
-        return block->files_n + block->folders_n;
-    }
-
-} // namespace BlockHelper
+// ====================== Comparison ======================
+bool Block::equals(const Block *other) const noexcept {
+    return other && std::memcmp(this, other, sizeof(Block)) == 0;
+}

@@ -19,7 +19,7 @@ set(COMMON_SOURCES
         md5.cpp
         mman.cpp
         utility.cpp
-        io_helpers.cpp
+        filesystem.cpp
         OpenES/support/base64/base64.cpp
         OpenES/OES.cpp
         OpenES/layer/raw-layer.cpp
@@ -48,6 +48,7 @@ set(COMMON_SOURCES
         OpenES/algo/prng.h
         OpenES/algo/sphinix.cpp
         OpenES/algo/sphinix.h
+        iNode/inode_raw.h
 )
 
 set(APP_SOURCES

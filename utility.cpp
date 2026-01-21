@@ -8,7 +8,7 @@
 #endif
 
 #include "utility.h"
-#include "io_helpers.h"
+#include "filesystem.h"
 
 
 
@@ -81,10 +81,6 @@ char *get_password(unsigned int len) {
     }
 
     return password;
-}
-
-bool is_lockbox(string &path) {
-    return is_file(path.c_str()) and file_extension(path) == "sc";
 }
 
 void handle_error(const char *msg, int code) {

@@ -1,1008 +1,1045 @@
-#include "iNode.h"
-#include "Block.h"
-#include "io_helpers.h"
-#include "utility.h"
 #include <iostream>
 #include <sstream>
-#include <fcntl.h>
-#include <unistd.h>
-#include <cstring>
-#include <sys/stat.h>
-#include <dirent.h>
-#include "mman.h"
+#include <algorithm>
+#include <stdexcept>
+#include <fstream>
+#include <functional>
 
-// ====================== Constructor / Destructor ======================
+#include "interface.h"
+#include "iNode.h"
+#include "filesystem.h"
+#include "OES.h"
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LIFECYCLE
+// ═══════════════════════════════════════════════════════════════════════════
 
 iNode::iNode(const std::string &path, OES *engine)
-    : root(std::make_unique<Block>()), cipherEngine(engine), lockbox(-1), filePath(path) {
-    // Try to open existing file first
-    lockbox = open(path.c_str(), O_RDWR);
+    : root_(std::make_unique<Block>()), cipher_(engine), path_(path) {
+    Block::setCipherEngine(engine);
 
-    if (lockbox != -1) {
-        // File exists - load it
-        size_t fileSize = getLockboxSize();
-
-        if (fileSize < sizeof(Block)) {
-            std::cerr << "Corrupted iNode file (too small): " << path << std::endl;
-            ::close(lockbox);
-            exit(255);
-        }
-
-        // Read root block (always at offset 0)
-        if (!readBlock(0, root.get())) {
-            std::cerr << "Failed to read root block from: " << path << std::endl;
-            ::close(lockbox);
-            exit(255);
-        }
-
-        std::cout << "Opened existing iNode: " << path << std::endl;
+    if (storage_.open(path)) {
+        if (!storage_.readBlock(0, root_.get()))
+            throw std::runtime_error("Failed to read root block: " + path);
     } else {
-        // File doesn't exist - create new one
-        lockbox = open(path.c_str(), O_RDWR | O_CREAT, 0666);
-
-        if (lockbox == -1) {
-            std::cerr << "Failed to create iNode file: " << path << std::endl;
-            exit(255);
-        }
-
-        // Initialize new iNode with root
-        root->setName("root");
-        root->isFile = false;
-        root->level = 0;
-        root->parent = 0;
-        root->current = insertBlock(root.get());
-
-        std::cout << "Created new iNode: " << path << std::endl;
+        if (!storage_.create(path))
+            throw std::runtime_error("Failed to create iNode: " + path);
+        root_->reset();
+        root_->setName("root");
+        root_->current = insertBlock(root_.get());
     }
 }
 
-iNode::~iNode() {
-    close_inode();
+iNode::~iNode() { storage_.close(); }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DATA ENCRYPTION/DECRYPTION
+// ═══════════════════════════════════════════════════════════════════════════
+
+std::pair<char *, size_t> iNode::encryptData(const char *data, size_t size) const {
+    if (!data || size == 0) return {nullptr, 0};
+    if (!cipher_) {
+        auto copy = static_cast<char *>(malloc(size));
+        if (copy) memcpy(copy, data, size);
+        return {copy, size};
+    }
+    try {
+        cipher_->resetBlocks();
+        cipher_->load_data_raw(const_cast<char *>(data), size);
+        auto *pb = cipher_->get_plainBlock();
+        if (!pb || pb->isNull()) goto fallback;
+        cipher_->enc_adv();
+        auto *cb = cipher_->get_cipherBlock();
+        if (!cb || cb->isNull()) goto fallback;
+        auto [exp, len] = exportBlock(cb, OES_TYPE_RAW_UINT8);
+        if (!exp || len == 0) goto fallback;
+        return {static_cast<char *>(exp), len};
+    } catch (...) {}
+fallback:
+    auto copy = static_cast<char *>(malloc(size));
+    if (copy) memcpy(copy, data, size);
+    return {copy, size};
 }
 
-// ====================== Display ======================
-
-void iNode::display() const {
-    // CRITICAL FIX: Reload root from disk to get current counts
-    Block freshRoot;
-    if (!readBlock(0, &freshRoot)) {
-        std::cerr << "Failed to read root block" << std::endl;
-        return;
+std::pair<char *, size_t> iNode::decryptData(const char *data, size_t size) const {
+    if (!data || size == 0 || !cipher_) {
+        auto copy = static_cast<char *>(malloc(size));
+        if (copy) memcpy(copy, data, size);
+        return {copy, size};
     }
-
-    std::cout << "==================================================================================================\n";
-    std::cout << "iNode Structure:\n";
-    std::cout << "==================================================================================================\n";
-
-    // Display root with fresh data from disk
-    std::cout << "/" << freshRoot.getName() << " [" << freshRoot.folders_n << " dirs, " << freshRoot.files_n << " files]\n";
-
-    // Walk from root's children
-    if (freshRoot.subdir_pos != 0) {
-        const_cast<iNode *>(this)->walkRecursive(freshRoot.subdir_pos, 1, "",
-                                                 [](Block *block, const std::string &path, iNode *node) {
-                                                     for (int i = 0; i < block->level; i++) {
-                                                         std::cout << "│  ";
-                                                     }
-                                                     std::cout << (block->isFile ? "├─   " : "├─ ") << block->
-                                                             getName();
-                                                     if (block->isFile) {
-                                                         std::cout << " (" << block->size << " bytes)";
-                                                     } else {
-                                                         std::cout << " [" << block->folders_n << " dirs, " << block->
-                                                                 files_n << " files]";
-                                                     }
-                                                     std::cout << std::endl;
-                                                 });
-    }
-
-    // Walk root's files
-    if (freshRoot.data_pos != 0) {
-        const_cast<iNode *>(this)->walkRecursive(freshRoot.data_pos, 1, "",
-                                                 [](Block *block, const std::string &path, iNode *node) {
-                                                     for (int i = 0; i < block->level; i++) {
-                                                         std::cout << "│  ";
-                                                     }
-                                                     std::cout << "├─ " << block->getName() << " (" << block->size <<
-                                                             " bytes)\n";
-                                                 });
-    }
-
-    std::cout << "==================================================================================================\n";
+    try {
+        cipher_->resetBlocks();
+        cipher_->load_cipher_data_raw(const_cast<char *>(data), size);
+        cipher_->dec_adv();
+        auto *pb = cipher_->get_plainBlock();
+        if (!pb || pb->isNull()) goto fallback;
+        auto [exp, len] = exportBlock(pb, OES_TYPE_UINT8);
+        if (!exp || len == 0) goto fallback;
+        return {static_cast<char *>(exp), len};
+    } catch (...) {}
+fallback:
+    auto copy = static_cast<char *>(malloc(size));
+    if (copy) memcpy(copy, data, size);
+    return {copy, size};
 }
 
-// ====================== Save/Export ======================
+// ═══════════════════════════════════════════════════════════════════════════
+// INTERNAL BLOCK OPERATIONS
+// ═══════════════════════════════════════════════════════════════════════════
 
-void iNode::save() {
-    // CRITICAL FIX: Reload root from disk before saving
-    readBlock(0, root.get());
+void iNode::syncRoot() const { storage_.readBlock(0, root_.get()); }
 
-    if (cipherEngine) {
-        cipherEngine->enc_adv();
-    }
-    updateBlock(root.get());
+std::unique_ptr<Block> iNode::readBlockAt(size_t pos) const {
+    if (pos == 0) return nullptr;
+    auto block = std::make_unique<Block>();
+    if (!storage_.readBlock(pos, block.get())) return nullptr;
+    return block;
 }
 
-void iNode::exportTo(const std::string &exportPath) {
-    std::string basePath = exportPath;
-    if (!makePath(basePath, true)) {
-        throw std::runtime_error("Failed to create export directory");
-    }
-
-    // Reload root to get fresh pointers
-    Block freshRoot;
-    readBlock(0, &freshRoot);
-
-    // Export root's subdirectories
-    if (freshRoot.subdir_pos != 0) {
-        walkRecursive(freshRoot.subdir_pos, 1, basePath, exportCallback);
-    }
-
-    // Export root's files
-    if (freshRoot.data_pos != 0) {
-        walkRecursive(freshRoot.data_pos, 1, basePath, exportCallback);
-    }
+std::unique_ptr<Block> iNode::cloneRoot() const {
+    auto block = std::make_unique<Block>();
+    storage_.readBlock(0, block.get());
+    return block;
 }
 
-void iNode::exportCallback(Block *block, const std::string &path, iNode *node) {
-    if (!block->isFile) {
-        // Create directory
-        if (block->level > 0) {
-            if (!makePath(path, true)) {
-                std::cerr << "Failed to create directory: " << path << std::endl;
-            }
-        }
-        return;
-    }
-
-    // Create file
-    int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0666);
-    if (fd < 0) {
-        std::cerr << "Failed to create file: " << path << std::endl;
-        return;
-    }
-
-    if (ftruncate(fd, block->size) == -1) {
-        close(fd);
-        return;
-    }
-
-    char *dst = (char *) mmap(nullptr, block->size, PROT_WRITE, MAP_SHARED, fd, 0);
-    if (dst == MAP_FAILED) {
-        close(fd);
-        return;
-    }
-
-    // Read file data from iNode
-    if (!node->read(block->data_pos, dst, block->size)) {
-        munmap(dst, block->size);
-        close(fd);
-        return;
-    }
-
-    // Decrypt if cipher engine present
-    if (node->cipherEngine) {
-        auto decrypted = node->decryptData(dst, block->size);
-        if (decrypted.first) {
-            memcpy(dst, decrypted.first, decrypted.second);
-            free(decrypted.first);
-        }
-    }
-
-    msync(dst, block->size, MS_SYNC);
-    munmap(dst, block->size);
-    close(fd);
-}
-
-// ====================== File/Directory Operations ======================
-
-off64_t iNode::addFile(const std::string &internalPath, const char *data, size_t size) {
-    if (exists(internalPath, true)) {
-        std::cerr << "File already exists: " << internalPath << std::endl;
-        return 0;
-    }
-
-    std::string normalPath = normalizePath(internalPath);
-    std::string dirPath = basename(normalPath);
-    std::string fileName = filename(normalPath);
-
-    // Create parent directories if needed
-    off64_t parentPos = 0;
-    if (!dirPath.empty()) {
-        parentPos = createDirectoryChain(dirPath);
-    } else {
-        parentPos = root->current;
-    }
-
-    if (parentPos == 0) {
-        return 0;
-    }
-
-    // Encrypt data if cipher engine present
-    char *dataToStore = const_cast<char *>(data);
-    size_t sizeToStore = size;
-    bool needsFree = false;
-
-    if (cipherEngine) {
-        auto encrypted = encryptData(data, size);
-        dataToStore = encrypted.first;
-        sizeToStore = encrypted.second;
-        needsFree = true;
-    }
-
-    off64_t filePos = createFileBlock(fileName, dataToStore, sizeToStore, parentPos);
-
-    if (needsFree) {
-        free(dataToStore);
-    }
-
-    // CRITICAL FIX: Reload root after modification
-    readBlock(0, root.get());
-
-    return filePos;
-}
-
-off64_t iNode::addDirectory(const std::string &internalPath) {
-    if (exists(internalPath, false)) {
-        return 0; // Already exists
-    }
-
-    off64_t result = createDirectoryChain(normalizePath(internalPath));
-
-    // CRITICAL FIX: Reload root after modification
-    readBlock(0, root.get());
-
-    return result;
-}
-
-bool iNode::removeFile(const std::string &internalPath) {
-    auto [block, parent] = findBlockAndParent(internalPath, true);
-    if (!block) {
-        return false;
-    }
-
-    // Free data space
-    freeSpace(block->data_pos, block->size);
-
-    // Unlink from parent's file list
-    bool result = unlinkBlock(block);
-
-    // Update parent file count
-    if (parent) {
-        parent->files_n--;
-        updateBlock(parent);
-        delete parent;
-    }
-
-    delete block;
-
-    // CRITICAL FIX: Reload root after modification
-    readBlock(0, root.get());
-
-    return result;
-}
-
-bool iNode::removeDirectory(const std::string &internalPath) {
-    Block *block = findBlock(internalPath, false);
-    if (!block) {
-        return false;
-    }
-
-    // Check if directory is empty
-    if (block->subdir_pos != 0 || block->data_pos != 0) {
-        std::cerr << "Cannot remove non-empty directory: " << internalPath << std::endl;
-        delete block;
-        return false;
-    }
-
-    bool result = unlinkBlock(block);
-    delete block;
-
-    // CRITICAL FIX: Reload root after modification
-    readBlock(0, root.get());
-
-    return result;
-}
-
-std::pair<char *, size_t> iNode::readFile(const std::string &internalPath) {
-    Block *fileBlock = findBlock(internalPath, true);
-    if (!fileBlock) {
-        return {nullptr, 0};
-    }
-
-    char *data = (char *) malloc(fileBlock->size);
-    if (!read(fileBlock->data_pos, data, fileBlock->size)) {
-        free(data);
-        delete fileBlock;
-        return {nullptr, 0};
-    }
-
-    // Decrypt if cipher engine present
-    if (cipherEngine) {
-        auto decrypted = decryptData(data, fileBlock->size);
-        free(data);
-        delete fileBlock;
-        return decrypted;
-    }
-
-    size_t size = fileBlock->size;
-    delete fileBlock;
-    return {data, size};
-}
-
-bool iNode::updateFile(const std::string &internalPath, const char *data, size_t size) {
-    Block *fileBlock = findBlock(internalPath, true);
-    if (!fileBlock) {
-        return false;
-    }
-
-    // Free old data space
-    freeSpace(fileBlock->data_pos, fileBlock->size);
-
-    // Encrypt new data if needed
-    char *dataToStore = const_cast<char *>(data);
-    size_t sizeToStore = size;
-    bool needsFree = false;
-
-    if (cipherEngine) {
-        auto encrypted = encryptData(data, size);
-        dataToStore = encrypted.first;
-        sizeToStore = encrypted.second;
-        needsFree = true;
-    }
-
-    // Allocate new space and write data
-    fileBlock->data_pos = allocateSpace(sizeToStore);
-    fileBlock->size = sizeToStore;
-
-    bool result = write(dataToStore, fileBlock->data_pos, sizeToStore) && updateBlock(fileBlock);
-
-    if (needsFree) {
-        free(dataToStore);
-    }
-
-    delete fileBlock;
-    return result;
-}
-
-bool iNode::exists(const std::string &internalPath, bool isFile) const {
-    Block *block = findBlock(internalPath, isFile);
-    if (block) {
-        delete block;
-        return true;
-    }
-    return false;
-}
-
-Block *iNode::findBlock(const std::string &internalPath, bool isFile) const {
-    std::string normalPath = normalizePath(internalPath);
-
-    if (normalPath.empty()) {
-        return cloneBlock(root.get());
-    }
-
-    // Navigate to parent directory
-    std::string dirPath = basename(normalPath);
-    std::string targetName = filename(normalPath);
-
-    Block *currentDir = nullptr;
-
-    if (dirPath.empty()) {
-        // Target is in root
-        currentDir = cloneBlock(root.get());
-    } else {
-        // Navigate to parent directory
-        std::istringstream pathStream(dirPath);
-        std::string token;
-        currentDir = cloneBlock(root.get());
-
-        while (std::getline(pathStream, token, '/')) {
-            if (token.empty()) continue;
-
-            if (currentDir->subdir_pos == 0) {
-                delete currentDir;
-                return nullptr;
-            }
-
-            Block *subdirBlock = new Block();
-            if (!readBlock(currentDir->subdir_pos, subdirBlock)) {
-                delete subdirBlock;
-                delete currentDir;
-                return nullptr;
-            }
-
-            bool found = false;
-            do {
-                if (strcmp(subdirBlock->name, token.c_str()) == 0) {
-                    found = true;
-                    delete currentDir;
-                    currentDir = subdirBlock;
-                    break;
-                }
-
-                if (subdirBlock->next == 0) break;
-            } while (readBlock(subdirBlock->next, subdirBlock));
-
-            if (!found) {
-                delete subdirBlock;
-                delete currentDir;
-                return nullptr;
-            }
-        }
-    }
-
-    // Now search in currentDir for the target
-    if (isFile) {
-        // Search in file list
-        if (currentDir->data_pos == 0) {
-            delete currentDir;
-            return nullptr;
-        }
-
-        Block *fileBlock = new Block();
-        if (!readBlock(currentDir->data_pos, fileBlock)) {
-            delete fileBlock;
-            delete currentDir;
-            return nullptr;
-        }
-
-        do {
-            if (strcmp(fileBlock->name, targetName.c_str()) == 0) {
-                // found — return block (caller must delete)
-                delete currentDir;
-                return fileBlock;
-            }
-            if (fileBlock->next == 0) break;
-            if (!readBlock(fileBlock->next, fileBlock)) break;
-        } while (true);
-
-        // Not found
-        delete fileBlock;
-        delete currentDir;
-        return nullptr;
-    } else {
-        // Search in subdirectory list
-        if (currentDir->subdir_pos == 0) {
-            delete currentDir;
-            return nullptr;
-        }
-
-        Block *subdirBlock = new Block();
-        if (!readBlock(currentDir->subdir_pos, subdirBlock)) {
-            delete subdirBlock;
-            delete currentDir;
-            return nullptr;
-        }
-
-        do {
-            if (strcmp(subdirBlock->name, targetName.c_str()) == 0) {
-                // found — return block (caller must delete)
-                delete currentDir;
-                return subdirBlock;
-            }
-            if (subdirBlock->next == 0) break;
-            if (!readBlock(subdirBlock->next, subdirBlock)) break;
-        } while (true);
-
-        // Not found
-        delete subdirBlock;
-        delete currentDir;
-        return nullptr;
-    }
-
-    // If looking for directory and target is empty (root case handled above)
-    // This should not be reached
-    return currentDir;
-}
-
-// ====================== Traversal Operations ======================
-
-void iNode::walk(const std::string &startPath, WalkerCallback callback) {
-    Block *startBlock = findBlock(startPath, false);
-    if (!startBlock) {
-        std::cerr << "Path not found: " << startPath << std::endl;
-        return;
-    }
-
-    callback(startBlock, startPath, this);
-
-    // Walk subdirectories
-    if (startBlock->subdir_pos != 0) {
-        walkRecursive(startBlock->subdir_pos, startBlock->level + 1, startPath, callback);
-    }
-
-    // Walk files
-    if (startBlock->data_pos != 0) {
-        walkRecursive(startBlock->data_pos, startBlock->level + 1, startPath, callback);
-    }
-
-    delete startBlock;
-}
-
-void iNode::walk(WalkerCallback callback) {
-    walk("/", callback);
-}
-
-void iNode::walkRecursive(off64_t blockPos, int level, const std::string &currentPath, WalkerCallback callback) {
-    Block *block = new Block();
-    if (!readBlock(blockPos, block)) {
-        delete block;
-        return;
-    }
-
-    std::string newPath = currentPath.empty() ? block->getName() : currentPath + "/" + block->getName();
-    callback(block, newPath, this);
-
-    // If it's a directory, walk its children
-    if (!block->isFile) {
-        if (block->subdir_pos != 0) {
-            walkRecursive(block->subdir_pos, level + 1, newPath, callback);
-        }
-        if (block->data_pos != 0) {
-            walkRecursive(block->data_pos, level + 1, newPath, callback);
-        }
-    }
-
-    // Walk siblings
-    if (block->next != 0) {
-        walkRecursive(block->next, level, currentPath, callback);
-    }
-
-    delete block;
-}
-
-unsigned int iNode::countSubdirs(const std::string &path) const {
-    if (path == "/" || path.empty()) {
-        // CRITICAL FIX: Reload root from disk to get current counts
-        Block freshRoot;
-        if (readBlock(0, &freshRoot)) {
-            return freshRoot.folders_n;
-        }
-        return root->folders_n;
-    }
-
-    Block *block = findBlock(path, false);
-    if (!block) {
-        return 0;
-    }
-
-    unsigned int count = block->folders_n;
-    delete block;
-    return count;
-}
-
-unsigned int iNode::countFiles(const std::string &path) const {
-    if (path == "/" || path.empty()) {
-        // CRITICAL FIX: Reload root from disk to get current counts
-        Block freshRoot;
-        if (readBlock(0, &freshRoot)) {
-            return freshRoot.files_n;
-        }
-        return root->files_n;
-    }
-
-    Block *block = findBlock(path, false);
-    if (!block) {
-        return 0;
-    }
-
-    unsigned int count = block->files_n;
-    delete block;
-    return count;
-}
-
-// ====================== Builder Function ======================
-
-std::unique_ptr<iNode> iNode::buildFromFilesystem(
-    const std::string &fsPath,
-    const std::string &inodePath,
-    OES *cipherEngine) {
-    auto node = std::make_unique<iNode>(inodePath, cipherEngine);
-
-    struct stat st;
-    if (stat(fsPath.c_str(), &st) != 0) {
-        throw std::runtime_error("Cannot access filesystem path: " + fsPath);
-    }
-
-    if (S_ISDIR(st.st_mode)) {
-        node->scanFilesystem(fsPath, "");
-    } else if (S_ISREG(st.st_mode)) {
-        // Single file
-        std::string fileName = filename(fsPath);
-        char *data = nullptr;
-        size_t size = 0;
-
-        int fd = open(fsPath.c_str(), O_RDONLY);
-        if (fd >= 0) {
-            size = st.st_size;
-            data = (char *) mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
-            if (data != MAP_FAILED) {
-                node->addFile(fileName, data, size);
-                munmap(data, size);
-            }
-            close(fd);
-        }
-    }
-
-    return node;
-}
-
-// ====================== Low-level IO ======================
-
-size_t iNode::getLockboxSize() const {
-    if (lockbox <= 0) return 0;
-    return lseek64(lockbox, 0, SEEK_END);
-}
-
-off64_t iNode::allocateSpace(size_t size) {
-    // Simple allocation: append to end
-    return getLockboxSize();
-}
-
-void iNode::freeSpace(off64_t pos, size_t size) {
-    // Add to free list (simple implementation)
-    freeList.push_back({pos, size});
-}
-
-void iNode::defragment() {
-    // TODO: Implement defragmentation
-}
-
-bool iNode::write(const void *buf, off64_t pos, size_t size) {
-    if (lockbox <= 0) return false;
-
-    size_t length = getLockboxSize();
-    size_t neededSize = pos + size;
-
-    if (neededSize > length) {
-        // Extend file
-        if (ftruncate(lockbox, neededSize) == -1) {
-            return false;
-        }
-        length = neededSize;
-    }
-
-    char *mapped = (char *) mmap(nullptr, length, PROT_WRITE, MAP_SHARED, lockbox, 0);
-    if (mapped == MAP_FAILED) {
-        return false;
-    }
-
-    memcpy(mapped + pos, buf, size);
-    msync(mapped, length, MS_SYNC);
-    munmap(mapped, length);
-
-    return true;
-}
-
-bool iNode::read(off64_t pos, void *buf, size_t size) const {
-    if (lockbox <= 0 || buf == nullptr) return false;
-
-    off64_t length = getLockboxSize();
-    if (pos + size > (size_t)length) {
-        return false;
-    }
-
-    char *mapped = (char *) mmap(nullptr, length, PROT_READ, MAP_SHARED, lockbox, 0);
-    if (mapped == MAP_FAILED) {
-        return false;
-    }
-
-    memcpy(buf, mapped + pos, size);
-    munmap(mapped, length);
-
-    return true;
-}
-
-// ====================== Block Operations ======================
-
-bool iNode::readBlock(off64_t offset, Block *block) const {
-    if (lockbox < 0 || offset < 0) return false;
-    return read(offset, block, sizeof(Block));
-}
-
-off64_t iNode::insertBlock(Block *block) {
-    off64_t pos = allocateSpace(sizeof(Block));
+size_t iNode::insertBlock(Block *block) {
+    size_t pos = storage_.allocate(sizeof(Block));
     block->current = pos;
-    write(block, pos, sizeof(Block));
+    storage_.writeBlock(pos, block);
     return pos;
 }
 
 bool iNode::updateBlock(Block *block) {
-    return write(block, block->current, sizeof(Block));
+    return storage_.writeBlock(block->current, block);
 }
 
-bool iNode::deleteBlock(off64_t pos) {
-    freeSpace(pos, sizeof(Block));
+bool iNode::deleteBlock(Block *block) {
+    storage_.free(block->current, sizeof(Block));
     return true;
 }
 
-// ====================== Navigation ======================
+bool iNode::unlinkBlock(Block *block) {
+    if (block->previous != 0)
+        storage_.modifyBlock(block->previous, [&](Block *p) { p->next = block->next; });
+    if (block->next != 0)
+        storage_.modifyBlock(block->next, [&](Block *n) { n->previous = block->previous; });
 
-Block *iNode::navigateToPath(const std::string &path, bool createIfMissing, bool isFile) const {
-    // Not used in current implementation
-    return nullptr;
-}
-
-std::pair<Block *, Block *> iNode::findBlockAndParent(const std::string &path, bool isFile) const {
-    std::string dirPath = basename(path);
-    Block *parent = dirPath.empty() ? cloneBlock(root.get()) : findBlock(dirPath, false);
-
-    if (!parent) {
-        return {nullptr, nullptr};
+    if (block->parent != 0) {
+        storage_.modifyBlock(block->parent, [&](Block *p) {
+            if (block->isFile && p->data_pos == block->current) p->data_pos = block->next;
+            else if (!block->isFile && p->subdir_pos == block->current) p->subdir_pos = block->next;
+        });
+    } else {
+        syncRoot();
+        if (block->isFile && root_->data_pos == block->current) root_->data_pos = block->next;
+        else if (!block->isFile && root_->subdir_pos == block->current) root_->subdir_pos = block->next;
+        updateBlock(root_.get());
     }
-
-    Block *block = findBlock(path, isFile);
-    return {block, parent};
+    return deleteBlock(block);
 }
 
-// ====================== Internal Helpers ======================
+std::unique_ptr<Block> iNode::findBlockByPath(const std::string &plainPath, bool isFile) const {
+    std::string norm = normalizePath(plainPath);
+    if (norm.empty()) return cloneRoot();
 
-off64_t iNode::createDirectoryChain(const std::string &path) {
-    std::istringstream pathStream(normalizePath(path));
-    std::string token;
+    std::string dirPath = getParentPath(norm);
+    std::string targetName = getFileName(norm);
 
-    Block *parent = cloneBlock(root.get());
-    Block *current = new Block();
-
-    int level = 1;
-
-    while (std::getline(pathStream, token, '/')) {
-        if (token.empty()) continue;
-
-        // Check if directory already exists
-        if (parent->subdir_pos != 0) {
-            readBlock(parent->subdir_pos, current);
+    std::unique_ptr<Block> currentDir;
+    if (dirPath.empty()) {
+        currentDir = cloneRoot();
+    } else {
+        currentDir = cloneRoot();
+        std::istringstream ss(dirPath);
+        std::string token;
+        while (std::getline(ss, token, '/')) {
+            if (token.empty()) continue;
+            if (currentDir->subdir_pos == 0) return nullptr;
+            auto sub = readBlockAt(currentDir->subdir_pos);
             bool found = false;
-
-            do {
-                if (strcmp(current->name, token.c_str()) == 0) {
+            while (sub) {
+                if (sub->nameEquals(token)) {
+                    currentDir = std::move(sub);
                     found = true;
                     break;
                 }
-            } while (current->next != 0 && readBlock(current->next, current));
-
-            if (found) {
-                delete parent;
-                parent = cloneBlock(current);
-                level++;
-                continue;
+                if (sub->next == 0) break;
+                sub = readBlockAt(sub->next);
             }
+            if (!found) return nullptr;
+        }
+    }
+
+    size_t searchPos = isFile ? currentDir->data_pos : currentDir->subdir_pos;
+    if (searchPos == 0) return nullptr;
+
+    auto result = readBlockAt(searchPos);
+    while (result) {
+        if (result->nameEquals(targetName)) return result;
+        if (result->next == 0) break;
+        result = readBlockAt(result->next);
+    }
+    return nullptr;
+}
+
+std::unique_ptr<Block> iNode::findParentByPath(const std::string &plainPath) const {
+    std::string dirPath = getParentPath(normalizePath(plainPath));
+    return dirPath.empty() ? cloneRoot() : findBlockByPath(dirPath, false);
+}
+
+size_t iNode::ensureDirChain(const std::string &plainPath) {
+    std::istringstream ss(normalizePath(plainPath));
+    std::string token;
+    auto parent = cloneRoot();
+    uint32_t level = 1;
+
+    while (std::getline(ss, token, '/')) {
+        if (token.empty()) continue;
+
+        if (parent->subdir_pos != 0) {
+            auto cur = readBlockAt(parent->subdir_pos);
+            bool found = false;
+            while (cur) {
+                if (cur->nameEquals(token)) {
+                    parent = std::move(cur);
+                    found = true;
+                    break;
+                }
+                if (cur->next == 0) break;
+                cur = readBlockAt(cur->next);
+            }
+            if (found) { level++; continue; }
         }
 
-        // Create new directory
-        current->reset();
-        current->setName(token.c_str());
-        current->isFile = false;
-        current->level = level;
-        current->parent = parent->current;
-        current->current = insertBlock(current);
+        auto newDir = std::make_unique<Block>();
+        newDir->reset();
+        newDir->setName(token);
+        newDir->isFile = false;
+        newDir->level = level;
+        newDir->parent = parent->current;
+        newDir->current = insertBlock(newDir.get());
 
-        // Link to parent
         if (parent->subdir_pos == 0) {
-            parent->subdir_pos = current->current;
+            parent->subdir_pos = newDir->current;
         } else {
-            Block *lastSibling = new Block();
-            readBlock(parent->subdir_pos, lastSibling);
-
-            while (lastSibling->next != 0) {
-                readBlock(lastSibling->next, lastSibling);
+            auto last = readBlockAt(parent->subdir_pos);
+            while (last && last->next != 0) last = readBlockAt(last->next);
+            if (last) {
+                last->next = newDir->current;
+                newDir->previous = last->current;
+                updateBlock(last.get());
             }
-
-            lastSibling->next = current->current;
-            current->previous = lastSibling->current;
-            updateBlock(lastSibling);
-            delete lastSibling;
         }
-
         parent->folders_n++;
-        updateBlock(parent);
-        updateBlock(current);
-
-        delete parent;
-        parent = cloneBlock(current);
+        updateBlock(parent.get());
+        updateBlock(newDir.get());
+        parent = std::move(newDir);
         level++;
     }
-
-    off64_t result = parent->current;
-    delete parent;
-    delete current;
-
-    return result;
+    return parent->current;
 }
 
-off64_t iNode::createFileBlock(const std::string &name, const char *data, size_t size, off64_t parentPos) {
-    Block *parent = new Block();
-    if (!readBlock(parentPos, parent)) {
-        delete parent;
-        return 0;
+size_t iNode::createFileBlock(const std::string &plainName, const char *encData,
+                              size_t encSize, size_t parentPos) {
+    auto parent = std::make_unique<Block>();
+    if (!storage_.readBlock(parentPos, parent.get())) return 0;
+    if (parent->isFile) return 0;
+
+    const auto fb = std::make_unique<Block>();
+    fb->reset();
+    fb->setName(plainName);
+    fb->isFile = true;
+    fb->level = parent->level + 1;
+    fb->parent = parentPos;
+    fb->size = encSize;
+
+    if (encData && encSize > 0) {
+        fb->data_pos = storage_.allocate(encSize);
+        if (!storage_.write(fb->data_pos, encData, encSize)) return 0;
     }
+    fb->current = insertBlock(fb.get());
 
-    Block *fileBlock = new Block();
-    fileBlock->reset();
-    fileBlock->setName(name.c_str());
-    fileBlock->isFile = true;
-    fileBlock->level = parent->level + 1;
-    fileBlock->parent = parentPos;
-    fileBlock->size = size;
-    fileBlock->data_pos = allocateSpace(size);
-
-    // Write file data
-    if (!write(data, fileBlock->data_pos, size)) {
-        delete parent;
-        delete fileBlock;
-        return 0;
-    }
-
-    fileBlock->current = insertBlock(fileBlock);
-
-    // Link to parent's file list
     if (parent->data_pos == 0) {
-        parent->data_pos = fileBlock->current;
+        parent->data_pos = fb->current;
     } else {
-        Block *lastFile = new Block();
-        readBlock(parent->data_pos, lastFile);
-
-        while (lastFile->next != 0) {
-            readBlock(lastFile->next, lastFile);
+        auto last = readBlockAt(parent->data_pos);
+        while (last && last->next != 0) last = readBlockAt(last->next);
+        if (last) {
+            last->next = fb->current;
+            fb->previous = last->current;
+            updateBlock(last.get());
+            updateBlock(fb.get());
         }
+    }
+    parent->files_n++;
+    updateBlock(parent.get());
 
-        lastFile->next = fileBlock->current;
-        fileBlock->previous = lastFile->current;
-        updateBlock(lastFile);
-        delete lastFile;
+    if (parentPos == 0) {
+        root_->files_n = parent->files_n;
+        root_->data_pos = parent->data_pos;
+    }
+    return fb->current;
+}
+
+std::pair<std::unique_ptr<char[]>, size_t> iNode::readFileData(Block *block) const {
+    if (!block || block->size == 0) return {nullptr, 0};
+    auto data = std::make_unique<char[]>(block->size);
+    if (!storage_.read(block->data_pos, data.get(), block->size)) return {nullptr, 0};
+
+    if (cipher_) {
+        auto [dec, decSize] = decryptData(data.get(), block->size);
+        if (dec && decSize > 0) {
+            auto result = std::make_unique<char[]>(decSize);
+            memcpy(result.get(), dec, decSize);
+            free(dec);
+            return {std::move(result), decSize};
+        }
+    }
+    return {std::move(data), block->size};
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PUBLIC API
+// ═══════════════════════════════════════════════════════════════════════════
+
+size_t iNode::addFile(const std::string &plainPath, const char *data, size_t size) {
+    if (!data || size == 0) {
+        std::cerr << "Cannot add empty file: " << plainPath << std::endl;
+        return 0;
+    }
+    if (exists(plainPath, true)) {
+        std::cerr << "File already exists: " << plainPath << std::endl;
+        return 0;
     }
 
-    parent->files_n++;
-    updateBlock(parent);
+    std::string norm = normalizePath(plainPath);
+    std::string dirPath = getParentPath(norm);
+    std::string fileName = getFileName(norm);
 
-    off64_t result = fileBlock->current;
-    delete parent;
-    delete fileBlock;
+    syncRoot();
 
+    size_t parentPos = 0;
+    if (!dirPath.empty()) {
+        parentPos = ensureDirChain(dirPath);
+        if (parentPos == 0) {
+            std::cerr << "Failed to create directory chain: " << plainPath << std::endl;
+            return 0;
+        }
+    }
+
+    auto [encData, encSize] = encryptData(data, size);
+    size_t pos = createFileBlock(fileName, encData, encSize, parentPos);
+    if (encData) free(encData);
+
+    syncRoot();
+    return pos;
+}
+
+size_t iNode::addDirectory(const std::string &plainPath) {
+    if (exists(plainPath, false)) return 0;
+    size_t result = ensureDirChain(normalizePath(plainPath));
+    syncRoot();
     return result;
 }
 
-bool iNode::unlinkBlock(Block *block) {
-    // Unlink from siblings
-    if (block->previous != 0) {
-        Block *prev = new Block();
-        readBlock(block->previous, prev);
-        prev->next = block->next;
-        updateBlock(prev);
-        delete prev;
+bool iNode::removeFile(const std::string &plainPath) {
+    auto block = findBlockByPath(plainPath, true);
+    if (!block) return false;
+
+    if (block->data_pos != 0 && block->size > 0)
+        storage_.free(block->data_pos, block->size);
+
+    auto parent = findParentByPath(plainPath);
+    bool result = unlinkBlock(block.get());
+
+    if (result && parent) {
+        if (parent->files_n > 0) parent->files_n--;
+        updateBlock(parent.get());
     }
-
-    if (block->next != 0) {
-        Block *next = new Block();
-        readBlock(block->next, next);
-        next->previous = block->previous;
-        updateBlock(next);
-        delete next;
-    }
-
-    // Update parent's first child pointer if this was first
-    if (block->parent != 0) {
-        Block *parent = new Block();
-        readBlock(block->parent, parent);
-
-        if (block->isFile && parent->data_pos == block->current) {
-            parent->data_pos = block->next;
-            updateBlock(parent);
-        } else if (!block->isFile && parent->subdir_pos == block->current) {
-            parent->subdir_pos = block->next;
-            updateBlock(parent);
-        }
-
-        delete parent;
-    }
-
-    return deleteBlock(block->current);
+    syncRoot();
+    return result;
 }
 
-// ====================== Filesystem Scanner ======================
+bool iNode::removeDirectory(const std::string &plainPath, bool force) {
+    auto block = findBlockByPath(plainPath, false);
+    if (!block) return false;
 
-void iNode::scanFilesystem(const std::string &fsPath, const std::string &internalPath) {
-    DIR *dir = opendir(fsPath.c_str());
-    if (!dir) {
+    if (!force && (block->subdir_pos != 0 || block->data_pos != 0)) {
+        std::cerr << "Cannot remove non-empty directory: " << plainPath << std::endl;
+        return false;
+    }
+
+    auto parent = findParentByPath(plainPath);
+    bool result = unlinkBlock(block.get());
+
+    if (result && parent) {
+        if (parent->folders_n > 0) parent->folders_n--;
+        updateBlock(parent.get());
+    }
+    syncRoot();
+    return result;
+}
+
+bool iNode::removeDirectoryRecursive(const std::string &plainPath) {
+    auto block = findBlockByPath(plainPath, false);
+    if (!block) return false;
+
+    std::vector<std::pair<std::string, bool>> toDelete;
+    std::string normPlain = normalizePath(plainPath);
+
+    walk(plainPath, [&](Block *b, const std::string &p, iNode *) {
+        if (normalizePath(p) != normPlain)
+            toDelete.emplace_back(p, b->isFile);
+    });
+
+    std::sort(toDelete.begin(), toDelete.end(), [](const auto &a, const auto &b) {
+        return std::count(a.first.begin(), a.first.end(), '/') >
+               std::count(b.first.begin(), b.first.end(), '/');
+    });
+
+    for (const auto &[path, isFile] : toDelete) {
+        if (isFile) removeFile(path);
+        else removeDirectory(path, true);
+    }
+
+    block = findBlockByPath(plainPath, false);
+    if (!block) { syncRoot(); return true; }
+
+    block->folders_n = 0;
+    block->files_n = 0;
+    block->subdir_pos = 0;
+    block->data_pos = 0;
+    updateBlock(block.get());
+
+    auto parent = findParentByPath(plainPath);
+    bool result = unlinkBlock(block.get());
+
+    if (result && parent) {
+        if (parent->folders_n > 0) parent->folders_n--;
+        updateBlock(parent.get());
+    }
+    syncRoot();
+    return result;
+}
+
+bool iNode::remove(const std::string &plainPath) {
+    if (exists(plainPath, true)) return removeFile(plainPath);
+    if (exists(plainPath, false)) return removeDirectoryRecursive(plainPath);
+    return false;
+}
+
+std::pair<char *, size_t> iNode::readFile(const std::string &plainPath) {
+    auto block = findBlockByPath(plainPath, true);
+    if (!block) return {nullptr, 0};
+    auto [data, size] = readFileData(block.get());
+    if (!data) return {nullptr, 0};
+    return {data.release(), size};
+}
+
+bool iNode::updateFile(const std::string &plainPath, const char *data, size_t size) {
+    auto block = findBlockByPath(plainPath, true);
+    if (!block) return false;
+
+    if (block->data_pos != 0 && block->size > 0)
+        storage_.free(block->data_pos, block->size);
+
+    auto [encData, encSize] = encryptData(data, size);
+    block->data_pos = storage_.allocate(encSize);
+    block->size = encSize;
+
+    bool result = storage_.write(block->data_pos, encData, encSize) && updateBlock(block.get());
+    if (encData) free(encData);
+    return result;
+}
+
+bool iNode::exists(const std::string &plainPath, bool isFile) const {
+    std::string norm = normalizePath(plainPath);
+    if (norm.empty()) return !isFile;
+    auto block = findBlockByPath(plainPath, isFile);
+    return block != nullptr;
+}
+
+bool iNode::rename(const std::string &plainPath, const std::string &newPlainName) {
+    if (newPlainName.find('/') != std::string::npos || newPlainName.empty()) {
+        std::cerr << "Invalid name: " << newPlainName << std::endl;
+        return false;
+    }
+
+    auto block = findBlockByPath(plainPath, true);
+    if (!block) block = findBlockByPath(plainPath, false);
+    if (!block) return false;
+
+    std::string parentPath = getParentPath(normalizePath(plainPath));
+    std::string newFullPath = parentPath.empty() ? newPlainName : parentPath + "/" + newPlainName;
+    if (exists(newFullPath, true) || exists(newFullPath, false)) {
+        std::cerr << "Name already exists: " << newPlainName << std::endl;
+        return false;
+    }
+
+    block->setName(newPlainName);
+    bool result = updateBlock(block.get());
+    syncRoot();
+    return result;
+}
+
+bool iNode::move(const std::string &srcPlainPath, const std::string &destPlainPath) {
+    bool isFile = exists(srcPlainPath, true);
+    auto srcBlock = findBlockByPath(srcPlainPath, isFile);
+    if (!srcBlock) {
+        srcBlock = findBlockByPath(srcPlainPath, false);
+        isFile = false;
+    }
+    if (!srcBlock) {
+        std::cerr << "Source not found: " << srcPlainPath << std::endl;
+        return false;
+    }
+
+    std::string normDest = normalizePath(destPlainPath);
+    std::string destDir, destName;
+
+    if (exists(destPlainPath, false)) {
+        destDir = normDest;
+        destName = srcBlock->getPlainName();
+    } else {
+        destDir = getParentPath(normDest);
+        destName = getFileName(normDest);
+    }
+
+    size_t destParentPos = 0;
+    if (!destDir.empty()) {
+        destParentPos = ensureDirChain(destDir);
+        if (destParentPos == 0) {
+            std::cerr << "Failed to create destination directory" << std::endl;
+            return false;
+        }
+    }
+
+    std::string fullDestPath = destDir.empty() ? destName : destDir + "/" + destName;
+    if (exists(fullDestPath, true) || exists(fullDestPath, false)) {
+        std::cerr << "Destination already exists: " << fullDestPath << std::endl;
+        return false;
+    }
+
+    auto oldParent = findParentByPath(srcPlainPath);
+    if (oldParent) {
+        if (isFile) { if (oldParent->files_n > 0) oldParent->files_n--; }
+        else { if (oldParent->folders_n > 0) oldParent->folders_n--; }
+        updateBlock(oldParent.get());
+    }
+
+    if (srcBlock->previous != 0)
+        storage_.modifyBlock(srcBlock->previous, [&](Block *p) { p->next = srcBlock->next; });
+    if (srcBlock->next != 0)
+        storage_.modifyBlock(srcBlock->next, [&](Block *n) { n->previous = srcBlock->previous; });
+    if (srcBlock->parent != 0) {
+        storage_.modifyBlock(srcBlock->parent, [&](Block *p) {
+            if (isFile && p->data_pos == srcBlock->current) p->data_pos = srcBlock->next;
+            else if (!isFile && p->subdir_pos == srcBlock->current) p->subdir_pos = srcBlock->next;
+        });
+    } else {
+        syncRoot();
+        if (isFile && root_->data_pos == srcBlock->current) root_->data_pos = srcBlock->next;
+        else if (!isFile && root_->subdir_pos == srcBlock->current) root_->subdir_pos = srcBlock->next;
+        updateBlock(root_.get());
+    }
+
+    srcBlock->parent = destParentPos;
+    srcBlock->previous = 0;
+    srcBlock->next = 0;
+    srcBlock->setName(destName);
+
+    auto newParent = std::make_unique<Block>();
+    if (!storage_.readBlock(destParentPos, newParent.get())) return false;
+
+    size_t *listHead = isFile ? &newParent->data_pos : &newParent->subdir_pos;
+    if (*listHead == 0) {
+        *listHead = srcBlock->current;
+    } else {
+        auto last = readBlockAt(*listHead);
+        while (last && last->next != 0) last = readBlockAt(last->next);
+        if (last) {
+            last->next = srcBlock->current;
+            srcBlock->previous = last->current;
+            updateBlock(last.get());
+        }
+    }
+
+    if (isFile) newParent->files_n++;
+    else newParent->folders_n++;
+
+    updateBlock(newParent.get());
+    updateBlock(srcBlock.get());
+    syncRoot();
+    return true;
+}
+
+bool iNode::copy(const std::string &srcPlainPath, const std::string &destPlainPath) {
+    if (exists(srcPlainPath, true)) return copyFile(srcPlainPath, destPlainPath);
+    if (exists(srcPlainPath, false)) return copyDirectoryRecursive(srcPlainPath, destPlainPath);
+    std::cerr << "Source not found: " << srcPlainPath << std::endl;
+    return false;
+}
+
+bool iNode::copyFile(const std::string &srcPlainPath, const std::string &destPlainPath) {
+    auto [data, size] = readFile(srcPlainPath);
+    if (!data || size == 0) {
+        std::cerr << "Failed to read source file: " << srcPlainPath << std::endl;
+        return false;
+    }
+
+    std::string normDest = normalizePath(destPlainPath);
+    std::string finalDest = exists(destPlainPath, false)
+        ? normDest + "/" + getFileName(normalizePath(srcPlainPath))
+        : normDest;
+
+    if (exists(finalDest, true)) {
+        std::cerr << "Destination file already exists: " << finalDest << std::endl;
+        delete[] data;
+        return false;
+    }
+
+    size_t result = addFile(finalDest, data, size);
+    delete[] data;
+    return result != 0;
+}
+
+bool iNode::copyDirectoryRecursive(const std::string &srcPlainPath, const std::string &destPlainPath) {
+    std::string normSrc = normalizePath(srcPlainPath);
+    std::string normDest = normalizePath(destPlainPath);
+    std::string srcName = getFileName(normSrc);
+    std::string finalDest = exists(destPlainPath, false) ? normDest + "/" + srcName : normDest;
+
+    if (exists(finalDest, false) || exists(finalDest, true)) {
+        std::cerr << "Destination already exists: " << finalDest << std::endl;
+        return false;
+    }
+
+    if (addDirectory(finalDest) == 0) {
+        std::cerr << "Failed to create destination directory: " << finalDest << std::endl;
+        return false;
+    }
+
+    std::vector<std::tuple<std::string, std::string, bool>> items;
+    walk(srcPlainPath, [&](Block *b, const std::string &plainPath, iNode *) {
+        std::string normPath = normalizePath(plainPath);
+        if (normPath == normSrc) return;
+        std::string relPath = normPath.substr(normSrc.length());
+        if (!relPath.empty() && relPath[0] == '/') relPath = relPath.substr(1);
+        if (!relPath.empty()) items.emplace_back(plainPath, relPath, b->isFile);
+    });
+
+    std::sort(items.begin(), items.end(), [](const auto &a, const auto &b) {
+        if (!std::get<2>(a) && std::get<2>(b)) return true;
+        if (std::get<2>(a) && !std::get<2>(b)) return false;
+        return std::count(std::get<1>(a).begin(), std::get<1>(a).end(), '/') <
+               std::count(std::get<1>(b).begin(), std::get<1>(b).end(), '/');
+    });
+
+    for (const auto &[srcPath, relPath, isFile] : items) {
+        std::string destPath = finalDest + "/" + relPath;
+        if (isFile) {
+            auto [fdata, fsize] = readFile(srcPath);
+            if (fdata && fsize > 0) {
+                addFile(destPath, fdata, fsize);
+                delete[] fdata;
+            }
+        } else {
+            addDirectory(destPath);
+        }
+    }
+    syncRoot();
+    return true;
+}
+
+size_t iNode::importFile(const std::string &plainPath, const std::string &externalPath) {
+    std::ifstream file(externalPath, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) {
+        std::cerr << "Cannot open external file: " << externalPath << std::endl;
+        return 0;
+    }
+    size_t fileSize = file.tellg();
+    if (fileSize == 0) {
+        std::cerr << "Cannot import empty file" << std::endl;
+        return 0;
+    }
+    file.seekg(0);
+    std::vector<char> buffer(fileSize);
+    file.read(buffer.data(), fileSize);
+    file.close();
+    return addFile(plainPath, buffer.data(), fileSize);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DIRECTORY LISTING
+// ═══════════════════════════════════════════════════════════════════════════
+
+std::vector<iNode::DirEntry> iNode::listDirectory(const std::string &plainPath) const {
+    std::vector<DirEntry> entries;
+    std::string norm = normalizePath(plainPath);
+
+    std::unique_ptr<Block> dirBlock = norm.empty()
+        ? cloneRoot()
+        : findBlockByPath(plainPath, false);
+
+    if (!dirBlock) return entries;
+
+    if (dirBlock->subdir_pos != 0) {
+        auto cur = readBlockAt(dirBlock->subdir_pos);
+        while (cur) {
+            DirEntry e;
+            e.encryptedName = cur->getRawName();
+            e.name = cur->getPlainName();
+            e.isFile = false;
+            e.size = 0;
+            entries.push_back(e);
+            if (cur->next == 0) break;
+            cur = readBlockAt(cur->next);
+        }
+    }
+
+    if (dirBlock->data_pos != 0) {
+        auto cur = readBlockAt(dirBlock->data_pos);
+        while (cur) {
+            DirEntry e;
+            e.encryptedName = cur->getRawName();
+            e.name = cur->getPlainName();
+            e.isFile = true;
+            e.size = cur->size;
+            entries.push_back(e);
+            if (cur->next == 0) break;
+            cur = readBlockAt(cur->next);
+        }
+    }
+    return entries;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SEARCH & TRAVERSAL
+// ═══════════════════════════════════════════════════════════════════════════
+
+std::vector<std::string> iNode::search(const std::string &name, bool caseSensitive) {
+    std::vector<std::string> results;
+    std::string searchName = caseSensitive ? name : toLower(name);
+
+    walk([&](Block *b, const std::string &plainPath, iNode *) {
+        std::string blockName = getFileName(normalizePath(plainPath));
+        if (!caseSensitive) blockName = toLower(blockName);
+        if (blockName.find(searchName) != std::string::npos)
+            results.push_back(plainPath);
+    });
+    return results;
+}
+
+void iNode::walk(WalkCallback callback) { walk("/", callback); }
+
+void iNode::walk(const std::string &startPlainPath, WalkCallback callback) {
+    std::string norm = normalizePath(startPlainPath);
+
+    if (norm.empty()) {
+        auto root = cloneRoot();
+        callback(root.get(), "/", this);
+        if (root->subdir_pos != 0) walkRecursiveInternal(root->subdir_pos, 1, "", callback);
+        if (root->data_pos != 0) walkRecursiveInternal(root->data_pos, 1, "", callback);
         return;
     }
 
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != nullptr) {
-        std::string name = entry->d_name;
-        if (name == "." || name == "..") continue;
+    auto startBlock = findBlockByPath(startPlainPath, false);
+    if (!startBlock) {
+        startBlock = findBlockByPath(startPlainPath, true);
+        if (startBlock) callback(startBlock.get(), startPlainPath, this);
+        return;
+    }
 
-        std::string fullPath = fsPath + "/" + name;
-        std::string newInternalPath = internalPath.empty() ? name : internalPath + "/" + name;
+    callback(startBlock.get(), startPlainPath, this);
+    if (startBlock->subdir_pos != 0)
+        walkRecursiveInternal(startBlock->subdir_pos, startBlock->level + 1, startPlainPath, callback);
+    if (startBlock->data_pos != 0)
+        walkRecursiveInternal(startBlock->data_pos, startBlock->level + 1, startPlainPath, callback);
+}
 
-        struct stat st;
-        if (stat(fullPath.c_str(), &st) != 0) continue;
+void iNode::walkRecursiveInternal(size_t pos, uint32_t level, const std::string &currentPlainPath,
+                                  WalkCallback callback) {
+    if (pos == 0) return;
+    auto block = readBlockAt(pos);
+    if (!block) return;
 
-        if (S_ISDIR(st.st_mode)) {
-            addDirectory(newInternalPath);
-            scanFilesystem(fullPath, newInternalPath);
-        } else if (S_ISREG(st.st_mode)) {
-            int fd = open(fullPath.c_str(), O_RDONLY);
-            if (fd >= 0) {
-                size_t size = st.st_size;
-                char *data = (char *) mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
-                if (data != MAP_FAILED) {
-                    addFile(newInternalPath, data, size);
-                    munmap(data, size);
-                }
-                close(fd);
+    std::string plainName = block->getPlainName();
+    std::string newPath = (currentPlainPath.empty() || currentPlainPath == "/")
+                              ? plainName
+                              : currentPlainPath + "/" + plainName;
+
+    callback(block.get(), newPath, this);
+
+    if (!block->isFile) {
+        if (block->subdir_pos != 0) walkRecursiveInternal(block->subdir_pos, level + 1, newPath, callback);
+        if (block->data_pos != 0) walkRecursiveInternal(block->data_pos, level + 1, newPath, callback);
+    }
+    if (block->next != 0) walkRecursiveInternal(block->next, level, currentPlainPath, callback);
+}
+
+size_t iNode::countSubdirs(const std::string &plainPath) const {
+    std::string norm = normalizePath(plainPath);
+    if (norm.empty()) return cloneRoot()->folders_n;
+    auto block = findBlockByPath(plainPath, false);
+    return block ? block->folders_n : 0;
+}
+
+size_t iNode::countFiles(const std::string &plainPath) const {
+    std::string norm = normalizePath(plainPath);
+    if (norm.empty()) return cloneRoot()->files_n;
+    auto block = findBlockByPath(plainPath, false);
+    return block ? block->files_n : 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DISPLAY & STATS
+// ═══════════════════════════════════════════════════════════════════════════
+
+void iNode::display() const {
+    auto root = cloneRoot();
+    std::cout << "══════════════════════════════════════════════════════════════\n"
+              << "iNode Structure:\n"
+              << "══════════════════════════════════════════════════════════════\n"
+              << "📁 / [" << root->folders_n << " dirs, " << root->files_n << " files]\n";
+
+    std::vector<bool> cont;
+    std::function<void(size_t, int, bool)> printTree = [&](size_t pos, int depth, bool isLast) {
+        auto block = readBlockAt(pos);
+        if (!block) return;
+
+        for (int i = 0; i < depth - 1; i++)
+            std::cout << (i < (int)cont.size() && cont[i] ? "│   " : "    ");
+        if (depth > 0) std::cout << (isLast ? "└── " : "├── ");
+
+        std::string displayName = block->getPlainName();
+
+        if (block->isFile) {
+            std::cout << "📄 " << displayName << " (" << block->size << " bytes)\n";
+        } else {
+            std::cout << "📁 " << displayName << " [" << block->folders_n
+                      << " dirs, " << block->files_n << " files]\n";
+
+            bool hasData = block->data_pos != 0;
+            if (block->subdir_pos != 0) {
+                cont.push_back(hasData);
+                printTree(block->subdir_pos, depth + 1, !hasData && block->next == 0);
+                cont.pop_back();
+            }
+            if (hasData) {
+                cont.push_back(false);
+                printTree(block->data_pos, depth + 1, true);
+                cont.pop_back();
+            }
+        }
+        if (block->next != 0) printTree(block->next, depth, false);
+    };
+
+    if (root->subdir_pos != 0) {
+        cont.push_back(root->data_pos != 0);
+        printTree(root->subdir_pos, 1, root->data_pos == 0);
+        cont.pop_back();
+    }
+    if (root->data_pos != 0) {
+        cont.push_back(false);
+        printTree(root->data_pos, 1, true);
+        cont.pop_back();
+    }
+    std::cout << "══════════════════════════════════════════════════════════════\n";
+}
+
+iNode::Stats iNode::getStats() const {
+    Stats s = {0, 0, 0, 0, 0};
+    s.totalSize = storage_.getFileSize();
+    s.freeSpace = storage_.getFreeSpace();
+
+    const_cast<iNode *>(this)->walk([&s](Block *b, const std::string &, iNode *) {
+        if (b->isFile) {
+            s.fileCount++;
+            s.usedSpace += b->size + sizeof(Block);
+        } else {
+            s.dirCount++;
+            s.usedSpace += sizeof(Block);
+        }
+    });
+    return s;
+}
+
+void iNode::printStats() const {
+    Stats s = getStats();
+    std::cout << "\n═══════════════ LockBox Statistics ═══════════════\n"
+              << "  Total size:    " << s.totalSize << " bytes\n"
+              << "  Used space:    " << s.usedSpace << " bytes\n"
+              << "  Free space:    " << s.freeSpace << " bytes\n"
+              << "  Directories:   " << s.dirCount << "\n"
+              << "  Files:         " << s.fileCount << "\n"
+              << "  Fragments:     " << storage_.getFragmentCount() << "\n"
+              << "══════════════════════════════════════════════════\n";
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EXPORT & PERSISTENCE
+// ═══════════════════════════════════════════════════════════════════════════
+
+void iNode::save() {
+    syncRoot();
+    updateBlock(root_.get());
+}
+
+void iNode::exportTo(const std::string &exportPath) { exportTo(exportPath, ""); }
+
+void iNode::exportTo(const std::string &exportPath, const std::string &internalPlainPath) {
+    if (!Filesystem::createDirectory(exportPath, true))
+        throw std::runtime_error("Failed to create export directory");
+
+    if (internalPlainPath.empty()) {
+        auto root = cloneRoot();
+        if (root->subdir_pos != 0) exportRecursive(root->subdir_pos, exportPath);
+        if (root->data_pos != 0) exportRecursive(root->data_pos, exportPath);
+        return;
+    }
+
+    auto fileBlock = findBlockByPath(internalPlainPath, true);
+    if (fileBlock) {
+        exportSingleFile(fileBlock.get(), exportPath);
+        return;
+    }
+
+    auto dirBlock = findBlockByPath(internalPlainPath, false);
+    if (!dirBlock) throw std::runtime_error("Path not found: " + internalPlainPath);
+
+    std::string targetPath = exportPath + "/" + dirBlock->getPlainName();
+    Filesystem::createDirectory(targetPath, true);
+
+    if (dirBlock->subdir_pos != 0) exportRecursive(dirBlock->subdir_pos, targetPath);
+    if (dirBlock->data_pos != 0) exportRecursive(dirBlock->data_pos, targetPath);
+}
+
+void iNode::exportRecursive(size_t pos, const std::string &destPath) {
+    if (pos == 0) return;
+    auto block = readBlockAt(pos);
+    if (!block) return;
+
+    std::string plainName = block->getPlainName();
+    std::string fullPath = destPath + "/" + plainName;
+
+    if (block->isFile) {
+        auto [data, size] = readFileData(block.get());
+        if (data && size > 0) Filesystem::writeFile(fullPath, data.get(), size);
+    } else {
+        Filesystem::createDirectory(fullPath, true);
+        if (block->subdir_pos != 0) exportRecursive(block->subdir_pos, fullPath);
+        if (block->data_pos != 0) exportRecursive(block->data_pos, fullPath);
+    }
+
+    if (block->next != 0) exportRecursive(block->next, destPath);
+}
+
+void iNode::exportSingleFile(Block *block, const std::string &destPath) {
+    if (!block || !block->isFile) return;
+    std::string fullPath = destPath + "/" + block->getPlainName();
+    auto [data, size] = readFileData(block);
+    if (data && size > 0) Filesystem::writeFile(fullPath, data.get(), size);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BUILDER & IMPORT
+// ═══════════════════════════════════════════════════════════════════════════
+
+std::unique_ptr<iNode> iNode::buildFromFilesystem(const std::string &fsPath,
+                                                  const std::string &inodePath,
+                                                  OES *cipherEngine) {
+    auto node = std::make_unique<iNode>(inodePath, cipherEngine);
+
+    if (Filesystem::isDirectory(fsPath)) {
+        node->scanFilesystem(fsPath, "");
+    } else if (Filesystem::isFile(fsPath)) {
+        std::string fileName = Filesystem::getFilename(fsPath);
+        try {
+            auto [size, buffer] = Filesystem::readFile(fsPath);
+            if (size > 0) node->addFile(fileName, buffer.data(), size);
+        } catch (const std::exception &e) {
+            std::cerr << "Failed to read file: " << fsPath << " - " << e.what() << std::endl;
+        }
+    } else {
+        throw std::runtime_error("Cannot access: " + fsPath);
+    }
+    return node;
+}
+
+void iNode::scanFilesystem(const std::string &fsPath, const std::string &internalPlainPath) {
+    auto entries = Filesystem::listDirectory(fsPath);
+
+    for (const auto &entry : entries) {
+        std::string fullPath = fsPath + "/" + entry.name;
+        std::string newInternal = internalPlainPath.empty()
+                                      ? entry.name
+                                      : internalPlainPath + "/" + entry.name;
+
+        if (entry.isDirectory) {
+            addDirectory(newInternal);
+            scanFilesystem(fullPath, newInternal);
+        } else {
+            try {
+                auto [size, buffer] = Filesystem::readFile(fullPath);
+                if (size > 0) addFile(newInternal, buffer.data(), size);
+            } catch (const std::exception &e) {
+                std::cerr << "Failed to read: " << fullPath << " - " << e.what() << std::endl;
             }
         }
     }
-
-    closedir(dir);
 }
 
-// ====================== Encryption Helpers ======================
+// ═══════════════════════════════════════════════════════════════════════════
+// MAINTENANCE & ACCESSORS
+// ═══════════════════════════════════════════════════════════════════════════
 
-std::pair<char *, size_t> iNode::encryptData(const char *data, size_t size) {
-    if (!cipherEngine) {
-        auto copy = static_cast<char *>(malloc(size));
-        memcpy(copy, data, size);
-        return {copy, size};
-    }
-
-    cipherEngine->load_data_raw(const_cast<char *>(data), size)->enc_adv();
-
-    size_t encSize = cipherEngine->get_cipherBlock()->getLen();
-    auto encrypted = static_cast<char *>(malloc(encSize));
-    memcpy(encrypted, cipherEngine->get_cipherBlock()->getData(), encSize);
-
-    return {encrypted, encSize};
+bool iNode::defragment() {
+    storage_.defragmentFreeList();
+    return true;
 }
 
-std::pair<char *, size_t> iNode::decryptData(const char *data, size_t size) {
-    if (!cipherEngine) {
-        auto copy = static_cast<char *>(malloc(size));
-        memcpy(copy, data, size);
-        return {copy, size};
-    }
+const std::string &iNode::getFilePath() const { return path_; }
+OES *iNode::getCipherEngine() const { return cipher_; }
 
-    cipherEngine->load_data_raw(const_cast<char *>(data), size)->dec_adv();
-
-    size_t decSize = cipherEngine->get_cipherBlock()->getLen();
-    char *decrypted = (char *) malloc(decSize);
-    memcpy(decrypted, cipherEngine->get_cipherBlock()->getData(), decSize);
-
-    return {decrypted, decSize};
-}
-
-// ====================== Utility ======================
-
-Block *iNode::cloneBlock(const Block *src) const {
-    Block *dst = new Block();
-    memcpy(dst, src, sizeof(Block));
-    return dst;
-}
+// ═══════════════════════════════════════════════════════════════════════════
+// PATH UTILITIES
+// ═══════════════════════════════════════════════════════════════════════════
 
 std::string iNode::normalizePath(const std::string &path) const {
-    if (path.empty() || path == "/") {
-        return "";
-    }
-
+    if (path.empty() || path == "/") return "";
     std::string result = path;
-
-    // Remove leading slash
-    if (result[0] == '/') {
-        result = result.substr(1);
-    }
-
-    // Remove trailing slash
-    if (result.back() == '/') {
-        result = result.substr(0, result.size() - 1);
-    }
-
+    if (result.front() == '/') result.erase(0, 1);
+    if (!result.empty() && result.back() == '/') result.pop_back();
     return result;
 }
 
-void iNode::close_inode() {
-    if (lockbox > 0) {
-        ::close(lockbox);
-        lockbox = -1;
-    }
+std::string iNode::getParentPath(const std::string &path) const {
+    size_t pos = path.rfind('/');
+    return (pos == std::string::npos) ? "" : path.substr(0, pos);
+}
+
+std::string iNode::getFileName(const std::string &path) const {
+    size_t pos = path.rfind('/');
+    return (pos == std::string::npos) ? path : path.substr(pos + 1);
+}
+
+std::string iNode::toLower(const std::string &str) const {
+    std::string result = str;
+    std::transform(result.begin(), result.end(), result.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    return result;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LEGACY/COMPATIBILITY
+// ═══════════════════════════════════════════════════════════════════════════
+
+Block *iNode::findBlock(const std::string &path, bool isFile) const {
+    auto block = findBlockByPath(path, isFile);
+    return block ? block.release() : nullptr;
+}
+
+Block *iNode::findParent(const std::string &path) const {
+    auto block = findParentByPath(path);
+    return block ? block.release() : nullptr;
 }

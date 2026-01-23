@@ -60,7 +60,7 @@ typedef unsigned long long uint64_t;
 
 
 #define OES_TYPE_RAW_UINT8 0
-#define OES_TYPE_RAW 1
+#define OES_TYPE_MBLOCK 1
 #define OES_TYPE_UINT8 2
 #define OES_TYPE_HEX 3
 #define OES_TYPE_CHAR 4

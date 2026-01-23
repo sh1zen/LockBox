@@ -261,7 +261,8 @@ MBLOCK *MBLOCK::fromBytes_raw(const void *src, const size_t nByte) {
     }
 
     const size_t blocks = nByte / OES_BYTES_X_BLOCK;
-    auto *out = new m_block[blocks]();
+    auto *out = new(std::nothrow) m_block[blocks]();
+    if (!out) return nullptr;
 
     const auto *bytes = static_cast<const uint8_t *>(src);
 
@@ -271,14 +272,17 @@ MBLOCK *MBLOCK::fromBytes_raw(const void *src, const size_t nByte) {
 
 #if OES_BYTES_X_BLOCK == 1
         block = bytes[pos];
+
 #elif OES_BYTES_X_BLOCK == 2
         block = (static_cast<m_block>(bytes[pos]) << 8) |
                 static_cast<m_block>(bytes[pos + 1]);
+
 #elif OES_BYTES_X_BLOCK == 4
         block = (static_cast<m_block>(bytes[pos]) << 24) |
                 (static_cast<m_block>(bytes[pos + 1]) << 16) |
                 (static_cast<m_block>(bytes[pos + 2]) << 8) |
                 static_cast<m_block>(bytes[pos + 3]);
+
 #elif OES_BYTES_X_BLOCK == 8
         block = (static_cast<m_block>(bytes[pos]) << 56) |
                 (static_cast<m_block>(bytes[pos + 1]) << 48) |
@@ -288,18 +292,30 @@ MBLOCK *MBLOCK::fromBytes_raw(const void *src, const size_t nByte) {
                 (static_cast<m_block>(bytes[pos + 5]) << 16) |
                 (static_cast<m_block>(bytes[pos + 6]) << 8) |
                 static_cast<m_block>(bytes[pos + 7]);
+
 #elif OES_BYTES_X_BLOCK == 16
-        // Per __int128: costruisci dalle due metà
-        m_block high = 0, low = 0;
-        for (int j = 0; j < 8; j++) {
-            high = (high << 8) | static_cast<m_block>(bytes[pos + j]);
-        }
-        for (int j = 0; j < 8; j++) {
-            low = (low << 8) | static_cast<m_block>(bytes[pos + 8 + j]);
-        }
-        block = (high << 64) | low;
+        // Per __uint128_t: costruisci dalle due metà (big-endian)
+        uint64_t high = 0, low = 0;
+        high = (static_cast<uint64_t>(bytes[pos]) << 56) |
+               (static_cast<uint64_t>(bytes[pos + 1]) << 48) |
+               (static_cast<uint64_t>(bytes[pos + 2]) << 40) |
+               (static_cast<uint64_t>(bytes[pos + 3]) << 32) |
+               (static_cast<uint64_t>(bytes[pos + 4]) << 24) |
+               (static_cast<uint64_t>(bytes[pos + 5]) << 16) |
+               (static_cast<uint64_t>(bytes[pos + 6]) << 8) |
+               static_cast<uint64_t>(bytes[pos + 7]);
+        low = (static_cast<uint64_t>(bytes[pos + 8]) << 56) |
+              (static_cast<uint64_t>(bytes[pos + 9]) << 48) |
+              (static_cast<uint64_t>(bytes[pos + 10]) << 40) |
+              (static_cast<uint64_t>(bytes[pos + 11]) << 32) |
+              (static_cast<uint64_t>(bytes[pos + 12]) << 24) |
+              (static_cast<uint64_t>(bytes[pos + 13]) << 16) |
+              (static_cast<uint64_t>(bytes[pos + 14]) << 8) |
+              static_cast<uint64_t>(bytes[pos + 15]);
+        block = (static_cast<m_block>(high) << 64) | static_cast<m_block>(low);
+
 #else
-        // Fallback generico
+        // Fallback generico (non raccomandato per tipi > 64 bit)
         for (size_t j = 0; j < OES_BYTES_X_BLOCK; j++) {
             block = (block << 8) | static_cast<m_block>(bytes[pos + j]);
         }
@@ -307,7 +323,12 @@ MBLOCK *MBLOCK::fromBytes_raw(const void *src, const size_t nByte) {
         out[i] = block;
     }
 
-    return new MBLOCK(out, blocks, true);
+    auto *result = new(std::nothrow) MBLOCK(out, blocks, true);
+    if (!result) {
+        delete[] out;
+        return nullptr;
+    }
+    return result;
 }
 
 __attribute__((noinline))
@@ -315,7 +336,8 @@ std::pair<uint8_t *, size_t> MBLOCK::toBytes_raw(const size_t extraSize) const {
     if (!data || len == 0) return {nullptr, 0};
 
     const size_t outLen = OES_BYTES_X_BLOCK * len + extraSize;
-    auto *converted = new uint8_t[outLen]();
+    auto *converted = new(std::nothrow) uint8_t[outLen]();
+    if (!converted) return {nullptr, 0};
 
     for (size_t i = 0; i < len; i++) {
         const size_t pos = i * OES_BYTES_X_BLOCK;
@@ -323,14 +345,17 @@ std::pair<uint8_t *, size_t> MBLOCK::toBytes_raw(const size_t extraSize) const {
 
 #if OES_BYTES_X_BLOCK == 1
         converted[pos] = static_cast<uint8_t>(block);
+
 #elif OES_BYTES_X_BLOCK == 2
         converted[pos] = static_cast<uint8_t>(block >> 8);
         converted[pos + 1] = static_cast<uint8_t>(block);
+
 #elif OES_BYTES_X_BLOCK == 4
         converted[pos] = static_cast<uint8_t>(block >> 24);
         converted[pos + 1] = static_cast<uint8_t>(block >> 16);
         converted[pos + 2] = static_cast<uint8_t>(block >> 8);
         converted[pos + 3] = static_cast<uint8_t>(block);
+
 #elif OES_BYTES_X_BLOCK == 8
         converted[pos] = static_cast<uint8_t>(block >> 56);
         converted[pos + 1] = static_cast<uint8_t>(block >> 48);
@@ -340,9 +365,35 @@ std::pair<uint8_t *, size_t> MBLOCK::toBytes_raw(const size_t extraSize) const {
         converted[pos + 5] = static_cast<uint8_t>(block >> 16);
         converted[pos + 6] = static_cast<uint8_t>(block >> 8);
         converted[pos + 7] = static_cast<uint8_t>(block);
+
+#elif OES_BYTES_X_BLOCK == 16
+        // Per __uint128_t: estrai le due metà (big-endian)
+        const auto high = static_cast<uint64_t>(block >> 64);
+        const auto low = static_cast<uint64_t>(block);
+
+        converted[pos] = static_cast<uint8_t>(high >> 56);
+        converted[pos + 1] = static_cast<uint8_t>(high >> 48);
+        converted[pos + 2] = static_cast<uint8_t>(high >> 40);
+        converted[pos + 3] = static_cast<uint8_t>(high >> 32);
+        converted[pos + 4] = static_cast<uint8_t>(high >> 24);
+        converted[pos + 5] = static_cast<uint8_t>(high >> 16);
+        converted[pos + 6] = static_cast<uint8_t>(high >> 8);
+        converted[pos + 7] = static_cast<uint8_t>(high);
+        converted[pos + 8] = static_cast<uint8_t>(low >> 56);
+        converted[pos + 9] = static_cast<uint8_t>(low >> 48);
+        converted[pos + 10] = static_cast<uint8_t>(low >> 40);
+        converted[pos + 11] = static_cast<uint8_t>(low >> 32);
+        converted[pos + 12] = static_cast<uint8_t>(low >> 24);
+        converted[pos + 13] = static_cast<uint8_t>(low >> 16);
+        converted[pos + 14] = static_cast<uint8_t>(low >> 8);
+        converted[pos + 15] = static_cast<uint8_t>(low);
+
 #else
+        // Fallback generico
         for (size_t j = 0; j < OES_BYTES_X_BLOCK; j++) {
-            converted[pos + j] = static_cast<uint8_t>(block >> (8 * (OES_BYTES_X_BLOCK - 1 - j)));
+            converted[pos + j] = static_cast<uint8_t>(
+                block >> (8 * (OES_BYTES_X_BLOCK - 1 - j))
+            );
         }
 #endif
     }

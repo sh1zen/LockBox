@@ -16,9 +16,7 @@ endif()
 
 # ======================= SOURCES =======================
 set(COMMON_SOURCES
-        md5.cpp
         mman.cpp
-        utility.cpp
         filesystem.cpp
         OpenES/support/base64/base64.cpp
         OpenES/OES.cpp

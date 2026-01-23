@@ -203,7 +203,7 @@ std::pair<void *, size_t> exportBlock(MBLOCK *block, int mode) {
         case OES_EXPORT_BASE64:
             return oes_export_block_to_base64(block);
 
-        case OES_TYPE_RAW:
+        case OES_TYPE_MBLOCK:
         default: {
             const size_t count = block->getLen();
             const size_t bytes = count * sizeof(m_block);
@@ -211,7 +211,7 @@ std::pair<void *, size_t> exportBlock(MBLOCK *block, int mode) {
             if (!copy) return {nullptr, 0};
 
             // Direct copy if MBLOCK stores contiguously, else element-wise
-            for (size_t i = 0; i < count; ++i) {
+            for (size_t i = 0; i < count; i++) {
                 copy[i] = block->getBlock(i);
             }
             return {copy, count};
@@ -229,13 +229,16 @@ MBLOCK *importBlock(const void *data, size_t len, int mode) {
         case OES_TYPE_UINT8:
             return MBLOCK::fromBytes(data, len);
 
+        case OES_TYPE_RAW_UINT8:
+            return MBLOCK::fromBytes_raw(data, len);
+
         case OES_TYPE_CHAR:
             return MBLOCK::fromBytes(data, len > 0 ? len - 1 : 0);
 
         case OES_EXPORT_BASE64:
             return oes_import_block_from_base64(static_cast<const char *>(data));
 
-        case OES_TYPE_RAW:
+        case OES_TYPE_MBLOCK:
         default: {
             if (len == 0) return nullptr;
             const size_t bytes = len * sizeof(m_block);

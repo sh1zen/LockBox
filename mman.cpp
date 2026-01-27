@@ -1,5 +1,4 @@
 #include "mman.h"
-#include <cerrno>
 
 #ifdef _WIN32
 
@@ -59,7 +58,7 @@ namespace {
         }
     }
 
-    inline void setErrnoFromWindows() noexcept {
+    void setErrnoFromWindows() noexcept {
         errno = windowsErrorToErrno(GetLastError());
     }
 } // anonymous namespace
@@ -74,7 +73,7 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, mman_offset_t of
     }
 
     const bool anonymous = (flags & MAP_ANONYMOUS) != 0;
-    HANDLE fileHandle = INVALID_HANDLE_VALUE;
+    auto fileHandle = INVALID_HANDLE_VALUE;
 
     if (!anonymous) {
         fileHandle = reinterpret_cast<HANDLE>(_get_osfhandle(fd));
@@ -184,7 +183,7 @@ int munlock(const void *addr, size_t len) {
 
 namespace mman {
     namespace {
-        inline std::error_code lastError() noexcept {
+        std::error_code lastError() noexcept {
             return {
 #ifdef _WIN32
                 std::error_code(static_cast<int>(GetLastError()), std::system_category())

@@ -126,18 +126,17 @@ namespace mman {
 
     // ====================== Functions ======================
 
-    [[nodiscard]] MapResult map(void *addr, size_t len, Prot prot, MapFlags flags,
-                                int fd = -1, mman_offset_t offset = 0) noexcept;
+    MapResult map(void *addr, size_t len, Prot prot, MapFlags flags, int fd = -1, mman_offset_t offset = 0) noexcept;
 
-    [[nodiscard]] OpResult unmap(void *addr, size_t len) noexcept;
+    OpResult unmap(void *addr, size_t len) noexcept;
 
-    [[nodiscard]] OpResult protect(void *addr, size_t len, Prot prot) noexcept;
+    OpResult protect(void *addr, size_t len, Prot prot) noexcept;
 
-    [[nodiscard]] OpResult sync(void *addr, size_t len, SyncFlags flags = SyncFlags::Sync) noexcept;
+    OpResult sync(void *addr, size_t len, SyncFlags flags = SyncFlags::Sync) noexcept;
 
-    [[nodiscard]] OpResult lock(const void *addr, size_t len) noexcept;
+    OpResult lock(const void *addr, size_t len) noexcept;
 
-    [[nodiscard]] OpResult unlock(const void *addr, size_t len) noexcept;
+    OpResult unlock(const void *addr, size_t len) noexcept;
 
     // ====================== RAII Wrapper ======================
 

@@ -6,7 +6,7 @@
 #include "core.h"
 #include "defines.h"
 #include "m_block.h"
-#include "random.h"
+#include "prng.h"
 #include "raw-layer.h"
 #include "sphinix.h"
 
@@ -57,9 +57,11 @@ MBLOCK *oes_enc_adv(const MBLOCK *plain, const MBLOCK *key, size_t *session) {
         return nullptr;
     }
 
+    size_t ses = session ? *session : 0;
+
     const size_t plainLen = plain->getLen();
     const size_t cipherLen = closestMultiple(plainLen + 2, OES_NUM_OF_BLOCKS);
-    size_t ses = session ? *session : 0;
+    auto prng = prng::PRNG(mBlock::rotr(prng::time_seed() ^ plainLen, ses) ^ cipherLen);
 
     // ========================================================================
     // PHASE 1: PREPROCESSING
@@ -70,7 +72,7 @@ MBLOCK *oes_enc_adv(const MBLOCK *plain, const MBLOCK *key, size_t *session) {
     if (!data) return nullptr;
 
     // 1.2 Inject random block for semantic security
-    data->setBlock(cipherLen - 2, OES_RNG().next64());
+    data->setBlock(cipherLen - 2, prng.next());
 
     // 1.3 Positional rotation
     data->rotr(2);

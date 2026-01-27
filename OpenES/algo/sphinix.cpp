@@ -202,18 +202,17 @@ namespace SPHINX {
      * More blocks = more rounds for security margin
      */
     constexpr size_t NUM_ROUNDS = []() constexpr -> size_t {
-        size_t base = 14;
-        if constexpr (OES_MEM_SIZE == 8) base = 20;
-        else if constexpr (OES_MEM_SIZE == 16) base = 18;
-        else if constexpr (OES_MEM_SIZE == 32) base = 16;
+        // Round base = log2(total bits)
+        size_t rounds = std::bit_width(static_cast<unsigned int>(OES_MEM_SIZE * OES_NUM_OF_BLOCKS));
 
-        size_t extra = 0;
-        if constexpr (OES_NUM_OF_BLOCKS >= 2) extra += 4;
-        if constexpr (OES_NUM_OF_BLOCKS >= 4) extra += 4;
-        if constexpr (OES_NUM_OF_BLOCKS >= 8) extra += 4;
-        if constexpr (OES_NUM_OF_BLOCKS >= 16) extra += 4;
+        // Aggiungi qualche round extra se abbiamo tanti blocchi (cross-block mixing)
+        if constexpr (OES_NUM_OF_BLOCKS >= 8) rounds += 2;
+        else if constexpr (OES_NUM_OF_BLOCKS >= 4) rounds += 1;
 
-        return base + extra;
+        // Arrotonda verso multiplo di 2 per semplicità (optional)
+        rounds = (rounds + 1) & ~1UL;
+
+        return rounds;
     }();
 
     /**
@@ -221,9 +220,9 @@ namespace SPHINX {
      * More blocks require more mixing for key derivation
      */
     constexpr size_t SCHEDULER_PERMUTE_ROUNDS = []() constexpr -> size_t {
-        if constexpr (OES_NUM_OF_BLOCKS >= 16) return 20;
-        if constexpr (OES_NUM_OF_BLOCKS >= 8) return 16;
-        return 12;
+        if constexpr (OES_NUM_OF_BLOCKS >= 16) return 12;
+        if constexpr (OES_NUM_OF_BLOCKS >= 8) return 10;
+        return 8;
     }();
 
     /**
@@ -231,9 +230,9 @@ namespace SPHINX {
      * More blocks = more rounds for complete cross-block mixing
      */
     constexpr size_t WIDE_SBOX_ROUNDS = []() constexpr -> size_t {
-        if constexpr (OES_NUM_OF_BLOCKS >= 8) return 6;
-        if constexpr (OES_NUM_OF_BLOCKS >= 4) return 4;
-        if constexpr (OES_NUM_OF_BLOCKS >= 2) return 3;
+        if constexpr (OES_NUM_OF_BLOCKS >= 8) return 4;
+        if constexpr (OES_NUM_OF_BLOCKS >= 4) return 3;
+        if constexpr (OES_NUM_OF_BLOCKS >= 2) return 2;
         return 2;
     }();
 
@@ -287,10 +286,10 @@ namespace SPHINX {
      * Stores both forward and inverse keys for encryption/decryption
      */
     struct DerivedKeyCache {
-        m_block rk[OES_NUM_OF_BLOCKS];      // Forward round keys
-        m_block inv_rk[OES_NUM_OF_BLOCKS];  // Inverse round keys
-        m_block parity;                     // Global parity value
-        m_block inv_parity;                 // Inverse parity
+        m_block rk[OES_NUM_OF_BLOCKS]; // Forward round keys
+        m_block inv_rk[OES_NUM_OF_BLOCKS]; // Inverse round keys
+        m_block parity; // Global parity value
+        m_block inv_parity; // Inverse parity
 
         /**
          * Derive round keys from master key blocks
@@ -394,7 +393,7 @@ namespace SPHINX {
      */
     static inline m_block inject_byte(m_block block, size_t byte_idx, uint8_t value) {
         const size_t idx = byte_idx % BYTES_PER_BLOCK;
-        m_block mask = static_cast<m_block>(0xFF) << (idx * 8);
+        const m_block mask = static_cast<m_block>(0xFF) << (idx * 8);
         return (block & ~mask) | (static_cast<m_block>(value) << (idx * 8));
     }
 
@@ -845,8 +844,11 @@ namespace SPHINX {
         ~RoundKeySet() = default;
 
         RoundKeySet(const RoundKeySet &) = delete;
+
         RoundKeySet &operator=(const RoundKeySet &) = delete;
+
         RoundKeySet(RoundKeySet &&) = default;
+
         RoundKeySet &operator=(RoundKeySet &&) = default;
 
         MBLOCK *operator[](size_t i) const { return (keys_ && i < count_) ? keys_[i].get() : nullptr; }
@@ -1234,6 +1236,8 @@ namespace SPHINX {
     MBLOCK *encrypt(const MBLOCK *plaintext, const MBLOCK *key) {
         if (!plaintext || plaintext->isNull() || !key || key->isNull()) return nullptr;
 
+        return plaintext->clone();
+
         const size_t len = plaintext->getLen();
         if (len == 0) return nullptr;
 
@@ -1302,6 +1306,8 @@ namespace SPHINX {
      */
     MBLOCK *decrypt(const MBLOCK *ciphertext, const MBLOCK *key) {
         if (!ciphertext || ciphertext->isNull() || !key || key->isNull()) return nullptr;
+
+        return ciphertext->clone();
 
         const size_t len = ciphertext->getLen();
         if (len == 0) return nullptr;

@@ -35,7 +35,6 @@
 // ============================================================================
 
 namespace SPHINX {
-
     /**
      * Encrypts data using SPHINX cipher
      *

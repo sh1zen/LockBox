@@ -1,12 +1,6 @@
 #ifndef INODE_H
 #define INODE_H
 
-#include <string>
-#include <vector>
-#include <memory>
-#include <functional>
-#include <unordered_map>
-
 #include "Block.h"
 #include "inode_raw.h"
 
@@ -17,7 +11,7 @@ public:
     // ====================== Types ======================
     struct DirEntry {
         std::string encryptedName;
-        std::string name; // Plain/decrypted name
+        std::string name;
         bool isFile;
         size_t size;
     };
@@ -37,7 +31,6 @@ public:
 
     ~iNode();
 
-    // Non-copyable
     iNode(const iNode &) = delete;
 
     iNode &operator=(const iNode &) = delete;
@@ -88,7 +81,7 @@ public:
     void walk(const std::string &startPlainPath, WalkCallback callback);
 
     // ====================== Display & Stats ======================
-    void display() const;
+    void display();
 
     Stats getStats() const;
 
@@ -109,16 +102,11 @@ public:
     // ====================== Maintenance & Accessors ======================
     bool defragment() const;
 
+    void preallocate(size_t bytes);
+
     const std::string &getFilePath() const;
 
     OES *getCipherEngine() const;
-
-    // ====================== Cache Management (Public for debugging) ======================
-    void clearCache() const;
-
-    void flushAll() const;
-
-    void syncRoot() const;
 
     // ====================== Logging System ======================
     std::string getLog() const;
@@ -136,9 +124,10 @@ public:
 
     static std::string toLower(const std::string &str);
 
+    void syncRoot() const;
+
 private:
     // ====================== Constants ======================
-    static constexpr size_t MAX_CACHE_SIZE = 128;
     static constexpr const char *LOG_INTERNAL_PATH = ".lockbox_log";
 
     // ====================== Data Members ======================
@@ -146,14 +135,16 @@ private:
     std::unique_ptr<Block> root_;
     OES *cipher_;
     std::string path_;
-    mutable std::unordered_map<size_t, std::unique_ptr<Block> > blockCache_;
 
-    // ====================== Cache Management ======================
-    Block *getCached(size_t pos) const;
+    // ====================== Synchronization ======================
+    void commitRoot() const;
 
-    void putCache(size_t pos, std::unique_ptr<Block> block) const;
+    void sync() const;
 
-    void invalidateCache(size_t pos) const;
+    // ====================== Direct Block Access (zero-copy) ======================
+    Block *blockAt(size_t pos) const;
+
+    void ensureCapacity(size_t needed) const;
 
     // ====================== Encryption ======================
     std::pair<char *, size_t> encryptData(const char *data, size_t size) const;
@@ -161,21 +152,17 @@ private:
     std::pair<char *, size_t> decryptData(const char *data, size_t size) const;
 
     // ====================== Internal Block Operations ======================
-    std::unique_ptr<Block> readBlockAt(size_t pos) const;
-
-    std::unique_ptr<Block> cloneRoot() const;
-
     size_t insertBlock(Block *block);
 
-    bool updateBlock(Block *block);
+    void updateBlock(Block *block);
 
-    bool deleteBlock(Block *block);
+    void deleteBlock(size_t pos);
 
-    bool unlinkBlock(Block *block);
+    void unlinkBlock(Block *block);
 
-    std::unique_ptr<Block> findBlockByPath(const std::string &plainPath, bool isFile) const;
+    Block *findBlock(const std::string &plainPath, bool isFile) const;
 
-    std::unique_ptr<Block> findParentByPath(const std::string &plainPath) const;
+    Block *findParent(const std::string &plainPath) const;
 
     size_t ensureDirChain(const std::string &plainPath);
 

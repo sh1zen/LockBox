@@ -1,11 +1,14 @@
 #ifndef PRNG_H
 #define PRNG_H
 
-#include "defines.h"
 #include "m_block.h"
+#include "defines.h"
 #include "constants.h"
 
 namespace prng {
+
+    m_block time_seed();
+
     class PRNG {
         static constexpr int S1 = (OES_MEM_SIZE * 30) / 64 + 1;
         static constexpr int S2 = (OES_MEM_SIZE * 27) / 64 + 1;
@@ -141,8 +144,5 @@ namespace prng {
     };
 }
 
-namespace prng_tests {
-    void run_all();
-}
 
 #endif // PRNG_H

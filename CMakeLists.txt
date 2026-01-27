@@ -36,8 +36,6 @@ set(COMMON_SOURCES
         OpenES/layer/m_block.h
         OpenES/layer/m_block.cpp
         OpenES/algo/constants.h
-        OpenES/algo/random.cpp
-        OpenES/algo/random.h
         OpenES/algo/core.cpp
         OpenES/algo/core.h
         OpenES/algo/utils.cpp
@@ -57,6 +55,8 @@ set(APP_SOURCES
 set(TEST_SOURCES
         test/tester.h
         test/oes_tests.cpp
+        test/prngtest.cpp
+        test/prngtest.h
 )
 
 # ======================= INCLUDE DIRECTORIES =======================

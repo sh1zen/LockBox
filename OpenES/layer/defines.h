@@ -2,11 +2,11 @@
 #define LOCKBOX_DEFINES_H
 
 #ifndef OES_NUM_OF_BLOCKS
-#define OES_NUM_OF_BLOCKS 16
+#define OES_NUM_OF_BLOCKS 8
 #endif
 
 #ifndef OES_LOGIC_BLOCK_SIZE
-#define OES_LOGIC_BLOCK_SIZE 128
+#define OES_LOGIC_BLOCK_SIZE 64
 #endif
 
 #if OES_NUM_OF_BLOCKS % 2 != 0

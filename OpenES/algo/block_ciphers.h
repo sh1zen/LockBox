@@ -1,5 +1,4 @@
-#ifndef LOCKBOX_BLOCK_CIPHERS_H
-#define LOCKBOX_BLOCK_CIPHERS_H
+#pragma once
 
 #include "m_block.h"
 
@@ -96,5 +95,3 @@ MBLOCK* oes_enc_adv(const MBLOCK* plain, const MBLOCK* key, size_t* session = nu
  * @return New MBLOCK* containing plaintext (caller must delete), or nullptr on error
  */
 MBLOCK* oes_dec_adv(const MBLOCK* cipher, const MBLOCK* key, size_t* session = nullptr);
-
-#endif //LOCKBOX_BLOCK_CIPHERS_H

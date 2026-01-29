@@ -1,12 +1,10 @@
-#include <iostream>
-#include <iomanip>
-#include <ctime>
-#include <chrono>
-#include <utility>
-
 #include "Block.h"
-#include "OES.h"
-#include "interface.h"
+
+#include <iostream>
+#include <chrono>
+
+#include <OpenES/OES.h>
+#include <OpenES/layer/interface.h>
 
 // ====================== Static Members ======================
 OES *Block::s_cipher = nullptr;
@@ -47,7 +45,7 @@ std::string Block::getStoredName() const {
     if (name_len == 0) return {};
 
     if (isNameInline()) {
-        return std::string(name_inline, name_len);
+        return {name_inline, name_len};
     }
 
     // External name: use resolver
@@ -113,7 +111,7 @@ std::string Block::encryptName(std::string_view plainName) {
         std::string result(static_cast<char *>(exp), len);
         free(exp);
         return result;
-    } catch (const std::exception &e) {
+    } catch (const std::exception &_) {
         return std::string(plainName);
     } catch (...) {
         return std::string(plainName);
@@ -148,7 +146,7 @@ std::string Block::decryptName(std::string_view encName) {
 
         delete[] bytes;
         return result;
-    } catch (const std::exception &e) {
+    } catch (const std::exception &_) {
         return std::string(encName);
     } catch (...) {
         return std::string(encName);

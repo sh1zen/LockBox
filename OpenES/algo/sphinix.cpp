@@ -1,7 +1,8 @@
+#include "sphinix.h"
+
 #include <memory>
 #include <algorithm>
 
-#include "sphinix.h"
 #include "core.h"
 #include "key_management.h"
 #include "support.h"
@@ -1236,8 +1237,6 @@ namespace SPHINX {
     MBLOCK *encrypt(const MBLOCK *plaintext, const MBLOCK *key) {
         if (!plaintext || plaintext->isNull() || !key || key->isNull()) return nullptr;
 
-        return plaintext->clone();
-
         const size_t len = plaintext->getLen();
         if (len == 0) return nullptr;
 
@@ -1306,8 +1305,6 @@ namespace SPHINX {
      */
     MBLOCK *decrypt(const MBLOCK *ciphertext, const MBLOCK *key) {
         if (!ciphertext || ciphertext->isNull() || !key || key->isNull()) return nullptr;
-
-        return ciphertext->clone();
 
         const size_t len = ciphertext->getLen();
         if (len == 0) return nullptr;

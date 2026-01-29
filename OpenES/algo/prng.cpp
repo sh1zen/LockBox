@@ -1,8 +1,7 @@
-#include <iomanip>
-#include <cmath>
+#include "prng.h"
+
 #include <chrono>
 
-#include "prng.h"
 #include "raw-layer.h"
 
 namespace prng {

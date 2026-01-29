@@ -1,11 +1,10 @@
+#include "iNode.h"
+
 #include <iostream>
 #include <fstream>
-#include <functional>
 #include <chrono>
-#include <ctime>
 
 #include "interface.h"
-#include "iNode.h"
 #include "filesystem.h"
 #include "OES.h"
 
@@ -44,23 +43,15 @@ iNode::~iNode() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 Block *iNode::blockAt(size_t pos) const {
-    return pos ? storage_.ptrAs<Block>(pos) : nullptr;
+    return pos ? static_cast<Block *>(const_cast<inode_raw &>(storage_).ptr(pos)) : nullptr;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// PREALLOCATION
+// SYNC OPERATIONS
 // ═══════════════════════════════════════════════════════════════════════════
-
-void iNode::ensureCapacity(size_t needed) const {
-    const size_t freeSpace = storage_.getFreeSpace();
-    if (freeSpace >= needed) return;
-
-    const size_t currentSize = storage_.getAllocatedSize();
-    storage_.reserve(currentSize + (needed - freeSpace));
-}
 
 void iNode::syncRoot() const {
-    if (const auto *b = storage_.ptrAs<Block>(root_->current))
+    if (const auto *b = static_cast<const Block *>(storage_.ptr(root_->current)))
         *root_ = *b;
 }
 
@@ -88,8 +79,6 @@ std::pair<char *, size_t> iNode::encryptData(const char *data, size_t size) cons
     try {
         cipher_->resetBlocks();
         cipher_->load_data_raw(const_cast<char *>(data), size);
-        auto *pb = cipher_->get_plainBlock();
-        if (!pb || pb->isNull()) goto fallback;
         cipher_->enc_adv();
         auto *cb = cipher_->get_cipherBlock();
         if (!cb || cb->isNull()) goto fallback;
@@ -132,22 +121,19 @@ fallback:
 // INTERNAL BLOCK OPERATIONS
 // ═══════════════════════════════════════════════════════════════════════════
 
-size_t iNode::insertBlock(Block *block) {
+size_t iNode::insertBlock(Block *block) const {
     size_t pos = storage_.allocate(sizeof(Block));
+    if (pos == inode_raw::NPOS) return 0;
     block->current = pos;
     storage_.writeBlock(pos, block);
     return pos;
 }
 
-void iNode::updateBlock(Block *block) {
+void iNode::updateBlock(const Block *block) const {
     storage_.writeBlock(block->current, block);
 }
 
-void iNode::deleteBlock(size_t pos) {
-    storage_.free(pos, sizeof(Block));
-}
-
-void iNode::unlinkBlock(Block *block) {
+void iNode::unlinkBlock(const Block *block) const {
     // Update sibling links
     if (block->previous) {
         if (auto *prev = blockAt(block->previous)) {
@@ -163,8 +149,7 @@ void iNode::unlinkBlock(Block *block) {
     }
 
     // Update parent's head pointer
-    Block *parent = block->parent ? blockAt(block->parent) : root_.get();
-    if (parent) {
+    if (Block *parent = block->parent ? blockAt(block->parent) : root_.get()) {
         bool updated = false;
         if (block->isFile && parent->data_pos == block->current) {
             parent->data_pos = block->next;
@@ -178,7 +163,7 @@ void iNode::unlinkBlock(Block *block) {
             else commitRoot();
         }
     }
-    deleteBlock(block->current);
+    // Note: space is not reclaimed until defragment() is called
 }
 
 Block *iNode::findBlock(const std::string &plainPath, bool isFile) const {
@@ -188,7 +173,6 @@ Block *iNode::findBlock(const std::string &plainPath, bool isFile) const {
     Block *cur = root_.get();
     size_t start = 0, end;
 
-    // Parse path components
     while ((end = norm.find('/', start)) != std::string::npos || start < norm.length()) {
         if (end == std::string::npos) end = norm.length();
         if (end <= start) {
@@ -199,7 +183,6 @@ Block *iNode::findBlock(const std::string &plainPath, bool isFile) const {
         std::string token = norm.substr(start, end - start);
         bool lastComponent = (end >= norm.length());
 
-        // Search in appropriate list
         size_t searchPos = lastComponent && isFile ? cur->data_pos : cur->subdir_pos;
         Block *found = nullptr;
 
@@ -223,7 +206,7 @@ Block *iNode::findParent(const std::string &plainPath) const {
     return findBlock(norm.substr(0, lastSlash), false);
 }
 
-size_t iNode::ensureDirChain(const std::string &plainPath) {
+size_t iNode::ensureDirChain(const std::string &plainPath) const {
     std::string norm = normalizePath(plainPath);
     Block *parent = root_.get();
     uint32_t level = 1;
@@ -238,7 +221,6 @@ size_t iNode::ensureDirChain(const std::string &plainPath) {
 
         std::string token = norm.substr(start, end - start);
 
-        // Search existing subdirs
         Block *found = nullptr;
         for (auto *b = blockAt(parent->subdir_pos); b; b = blockAt(b->next)) {
             if (b->nameEquals(token)) {
@@ -254,7 +236,6 @@ size_t iNode::ensureDirChain(const std::string &plainPath) {
             continue;
         }
 
-        // Create new directory
         auto newDir = std::make_unique<Block>();
         newDir->reset();
         newDir->setName(token);
@@ -265,7 +246,6 @@ size_t iNode::ensureDirChain(const std::string &plainPath) {
         newDir->setModifiedNow();
         newDir->current = insertBlock(newDir.get());
 
-        // Link to parent
         if (parent->subdir_pos == 0) {
             parent->subdir_pos = newDir->current;
         } else {
@@ -293,11 +273,11 @@ size_t iNode::ensureDirChain(const std::string &plainPath) {
 }
 
 size_t iNode::createFileBlock(const std::string &plainName, const char *encData,
-                              size_t encSize, size_t parentPos) {
+                              size_t encSize, size_t parentPos) const {
     Block *parent = parentPos ? blockAt(parentPos) : root_.get();
     if (!parent || parent->isFile) return 0;
 
-    auto fb = std::make_unique<Block>();
+    const auto fb = std::make_unique<Block>();
     fb->reset();
     fb->setName(plainName);
     fb->isFile = true;
@@ -309,11 +289,12 @@ size_t iNode::createFileBlock(const std::string &plainName, const char *encData,
 
     if (encData && encSize > 0) {
         fb->data_pos = storage_.allocate(encSize);
+        if (fb->data_pos == inode_raw::NPOS) return 0;
         storage_.write(fb->data_pos, encData, encSize);
     }
     fb->current = insertBlock(fb.get());
+    if (fb->current == 0) return 0;
 
-    // Link to parent's file list
     if (parent->data_pos == 0) {
         parent->data_pos = fb->current;
     } else {
@@ -339,7 +320,6 @@ size_t iNode::createFileBlock(const std::string &plainName, const char *encData,
 std::pair<std::unique_ptr<char[]>, size_t> iNode::readFileData(Block *block) const {
     if (!block || block->size == 0) return {nullptr, 0};
 
-    // Direct read from mmap
     const char *src = static_cast<const char *>(storage_.ptr(block->data_pos));
     if (!src) return {nullptr, 0};
 
@@ -361,7 +341,7 @@ std::pair<std::unique_ptr<char[]>, size_t> iNode::readFileData(Block *block) con
 // LOGGING
 // ═══════════════════════════════════════════════════════════════════════════
 
-void iNode::logOperation(const std::string &op, const std::string &details) {
+void iNode::logOperation(const std::string &op, const std::string &details) const {
     auto now = std::chrono::system_clock::now();
     auto t = std::chrono::system_clock::to_time_t(now);
     char buf[64];
@@ -371,8 +351,7 @@ void iNode::logOperation(const std::string &op, const std::string &details) {
     if (!details.empty()) entry += ": " + details;
     entry += "\n";
 
-    auto *logBlock = findBlock(LOG_INTERNAL_PATH, true);
-    if (logBlock) {
+    if (auto *logBlock = findBlock(LOG_INTERNAL_PATH, true)) {
         auto [existing, existingSize] = readFileData(logBlock);
         std::string fullLog;
         if (existing && existingSize > 0)
@@ -381,11 +360,13 @@ void iNode::logOperation(const std::string &op, const std::string &details) {
 
         auto [encData, encSize] = encryptData(fullLog.c_str(), fullLog.size());
         size_t newPos = storage_.reallocate(logBlock->data_pos, logBlock->size, encSize);
-        storage_.write(newPos, encData, encSize);
-        logBlock->data_pos = newPos;
-        logBlock->size = encSize;
-        logBlock->setModifiedNow();
-        updateBlock(logBlock);
+        if (newPos != inode_raw::NPOS) {
+            storage_.write(newPos, encData, encSize);
+            logBlock->data_pos = newPos;
+            logBlock->size = encSize;
+            logBlock->setModifiedNow();
+            updateBlock(logBlock);
+        }
         free(encData);
     } else {
         auto [encData, encSize] = encryptData(entry.c_str(), entry.size());
@@ -407,14 +388,16 @@ void iNode::clearLog() {
     auto *logBlock = findBlock(LOG_INTERNAL_PATH, true);
     if (!logBlock) return;
 
-    storage_.free(logBlock->data_pos, logBlock->size);
     std::string empty = "[Log cleared]\n";
     auto [encData, encSize] = encryptData(empty.c_str(), empty.size());
-    logBlock->data_pos = storage_.allocate(encSize);
-    logBlock->size = encSize;
-    logBlock->setModifiedNow();
-    storage_.write(logBlock->data_pos, encData, encSize);
-    updateBlock(logBlock);
+    size_t newPos = storage_.reallocate(logBlock->data_pos, logBlock->size, encSize);
+    if (newPos != inode_raw::NPOS) {
+        storage_.write(newPos, encData, encSize);
+        logBlock->data_pos = newPos;
+        logBlock->size = encSize;
+        logBlock->setModifiedNow();
+        updateBlock(logBlock);
+    }
     free(encData);
     sync();
 }
@@ -447,26 +430,22 @@ size_t iNode::addFile(const std::string &plainPath, const char *data, size_t siz
     return pos;
 }
 
-size_t iNode::addDirectory(const std::string &plainPath) {
+size_t iNode::addDirectory(const std::string &plainPath) const {
     if (exists(plainPath, false)) return 0;
     size_t result = ensureDirChain(normalizePath(plainPath));
     if (result > 0) logOperation("ADD_DIR", plainPath);
     return result;
 }
 
-bool iNode::removeFile(const std::string &plainPath) {
+bool iNode::removeFile(const std::string &plainPath) const {
     auto *block = findBlock(plainPath, true);
     if (!block) return false;
 
-    if (block->data_pos && block->size > 0)
-        storage_.free(block->data_pos, block->size);
-
+    // Note: data space not reclaimed until defragment()
     size_t parentPos = block->parent;
     unlinkBlock(block);
 
-    // Update parent count
-    Block *parent = parentPos ? blockAt(parentPos) : root_.get();
-    if (parent && parent->files_n > 0) {
+    if (Block *parent = parentPos ? blockAt(parentPos) : root_.get(); parent && parent->files_n > 0) {
         parent->files_n--;
         parent->setModifiedNow();
         if (parentPos) updateBlock(parent);
@@ -477,7 +456,7 @@ bool iNode::removeFile(const std::string &plainPath) {
     return true;
 }
 
-bool iNode::removeDirectory(const std::string &plainPath, bool force) {
+bool iNode::removeDirectory(const std::string &plainPath, bool force) const {
     auto *block = findBlock(plainPath, false);
     if (!block) return false;
     if (!force && (block->subdir_pos || block->data_pos)) return false;
@@ -485,8 +464,7 @@ bool iNode::removeDirectory(const std::string &plainPath, bool force) {
     size_t parentPos = block->parent;
     unlinkBlock(block);
 
-    Block *parent = parentPos ? blockAt(parentPos) : root_.get();
-    if (parent && parent->folders_n > 0) {
+    if (Block *parent = parentPos ? blockAt(parentPos) : root_.get(); parent && parent->folders_n > 0) {
         parent->folders_n--;
         parent->setModifiedNow();
         if (parentPos) updateBlock(parent);
@@ -510,7 +488,6 @@ bool iNode::removeDirectoryRecursive(const std::string &plainPath) {
             toDelete.emplace_back(p, b->isFile);
     });
 
-    // Sort: deepest first, files before directories
     std::sort(toDelete.begin(), toDelete.end(), [](const auto &a, const auto &b) {
         size_t da = std::count(a.first.begin(), a.first.end(), '/');
         size_t db = std::count(b.first.begin(), b.first.end(), '/');
@@ -521,8 +498,6 @@ bool iNode::removeDirectoryRecursive(const std::string &plainPath) {
     for (const auto &[path, isFile]: toDelete) {
         if (isFile) {
             if (auto *f = findBlock(path, true)) {
-                if (f->data_pos && f->size > 0)
-                    storage_.free(f->data_pos, f->size);
                 size_t pp = f->parent;
                 unlinkBlock(f);
                 if (auto *fp = pp ? blockAt(pp) : nullptr) {
@@ -542,7 +517,6 @@ bool iNode::removeDirectoryRecursive(const std::string &plainPath) {
         }
     }
 
-    // Delete the directory itself
     block = findBlock(plainPath, false);
     if (block) {
         size_t parentPos = block->parent;
@@ -566,7 +540,7 @@ bool iNode::remove(const std::string &plainPath) {
     return false;
 }
 
-std::pair<char *, size_t> iNode::readFile(const std::string &plainPath) {
+std::pair<char *, size_t> iNode::readFile(const std::string &plainPath) const {
     auto *block = findBlock(plainPath, true);
     if (!block) return {nullptr, 0};
 
@@ -580,12 +554,16 @@ std::pair<char *, size_t> iNode::readFile(const std::string &plainPath) {
     return {data.release(), size};
 }
 
-bool iNode::updateFile(const std::string &plainPath, const char *data, size_t size) {
+bool iNode::updateFile(const std::string &plainPath, const char *data, size_t size) const {
     auto *block = findBlock(plainPath, true);
     if (!block) return false;
 
     auto [encData, encSize] = encryptData(data, size);
     size_t newPos = storage_.reallocate(block->data_pos, block->size, encSize);
+    if (newPos == inode_raw::NPOS) {
+        free(encData);
+        return false;
+    }
     storage_.write(newPos, encData, encSize);
 
     block->data_pos = newPos;
@@ -605,22 +583,18 @@ bool iNode::exists(const std::string &plainPath, bool isFile) const {
     return findBlock(plainPath, isFile) != nullptr;
 }
 
-bool iNode::rename(const std::string &plainPath, const std::string &newName) {
+bool iNode::rename(const std::string &plainPath, const std::string &newName) const {
     if (newName.find('/') != std::string::npos || newName.empty()) return false;
 
-    bool isFile = true;
     auto *block = findBlock(plainPath, true);
-    if (!block) {
-        block = findBlock(plainPath, false);
-        isFile = false;
-    }
+    if (!block) block = findBlock(plainPath, false);
     if (!block) return false;
 
     std::string norm = normalizePath(plainPath);
     size_t lastSlash = norm.rfind('/');
     std::string parentPath = (lastSlash == std::string::npos) ? "" : norm.substr(0, lastSlash);
-    std::string newFullPath = parentPath.empty() ? newName : parentPath + "/" + newName;
 
+    std::string newFullPath = parentPath.empty() ? newName : parentPath + "/" + newName;
     if (exists(newFullPath, true) || exists(newFullPath, false)) return false;
 
     block->setName(newName);
@@ -631,7 +605,7 @@ bool iNode::rename(const std::string &plainPath, const std::string &newName) {
     return true;
 }
 
-bool iNode::move(const std::string &srcPath, const std::string &destPath) {
+bool iNode::move(const std::string &srcPath, const std::string &destPath) const {
     bool isFile = exists(srcPath, true);
     auto *src = findBlock(srcPath, isFile);
     if (!src) {
@@ -652,7 +626,7 @@ bool iNode::move(const std::string &srcPath, const std::string &destPath) {
         destName = (lastSlash == std::string::npos) ? normDest : normDest.substr(lastSlash + 1);
     }
 
-    size_t destParentPos = destDir.empty() ? 0 : ensureDirChain(destDir);
+    const size_t destParentPos = destDir.empty() ? 0 : ensureDirChain(destDir);
     std::string fullDest = destDir.empty() ? destName : destDir + "/" + destName;
     if (exists(fullDest, true) || exists(fullDest, false)) return false;
 
@@ -665,7 +639,6 @@ bool iNode::move(const std::string &srcPath, const std::string &destPath) {
         }
         oldParent->setModifiedNow();
 
-        // Update head pointer if needed
         size_t *head = isFile ? &oldParent->data_pos : &oldParent->subdir_pos;
         if (*head == src->current) *head = src->next;
 
@@ -762,19 +735,6 @@ bool iNode::copyDirectoryRecursive(const std::string &srcPath, const std::string
     std::string finalDest = exists(destPath, false) ? normDest + "/" + srcName : normDest;
 
     if (exists(finalDest, false) || exists(finalDest, true)) return false;
-
-    // Estimate total size needed
-    size_t totalSize = sizeof(Block); // Destination directory
-    walk(srcPath, [&](Block *b, const std::string &p, iNode *) {
-        std::string normP = normalizePath(p);
-        if (normP == normSrc) return;
-        totalSize += sizeof(Block);
-        if (b->isFile) totalSize += b->size;
-    });
-
-    // Preallocate all at once
-    ensureCapacity(totalSize);
-
     if (addDirectory(finalDest) == 0) return false;
 
     std::vector<std::tuple<std::string, std::string, bool> > items;
@@ -788,7 +748,6 @@ bool iNode::copyDirectoryRecursive(const std::string &srcPath, const std::string
         }
     });
 
-    // Directories first, shallow first
     std::sort(items.begin(), items.end(), [](const auto &a, const auto &b) {
         if (!std::get<2>(a) && std::get<2>(b)) return true;
         if (std::get<2>(a) && !std::get<2>(b)) return false;
@@ -799,8 +758,7 @@ bool iNode::copyDirectoryRecursive(const std::string &srcPath, const std::string
     for (const auto &[src, rel, isFile]: items) {
         std::string dest = finalDest + "/" + rel;
         if (isFile) {
-            auto [fdata, fsize] = readFile(src);
-            if (fdata && fsize > 0) {
+            if (auto [fdata, fsize] = readFile(src); fdata && fsize > 0) {
                 addFile(dest, fdata, fsize);
                 delete[] fdata;
             }
@@ -891,31 +849,30 @@ size_t iNode::countFiles(const std::string &plainPath) const {
 // TRAVERSAL
 // ═══════════════════════════════════════════════════════════════════════════
 
-void iNode::walk(WalkCallback cb) { walk("/", cb); }
+void iNode::walk(const WalkCallback &callback) { walk("/", callback); }
 
-void iNode::walk(const std::string &startPath, WalkCallback cb) {
+void iNode::walk(const std::string &startPath, const WalkCallback &callback) {
     std::string norm = normalizePath(startPath);
-
     if (norm.empty()) {
-        cb(root_.get(), "/", this);
-        walkIterative(root_->subdir_pos, "", cb);
-        walkIterative(root_->data_pos, "", cb);
+        callback(root_.get(), "/", this);
+        walkIterative(root_->subdir_pos, "", callback);
+        walkIterative(root_->data_pos, "", callback);
         return;
     }
 
     auto *start = findBlock(startPath, false);
     if (!start) {
         start = findBlock(startPath, true);
-        if (start) cb(start, startPath, this);
+        if (start) callback(start, startPath, this);
         return;
     }
 
-    cb(start, startPath, this);
-    walkIterative(start->subdir_pos, startPath, cb);
-    walkIterative(start->data_pos, startPath, cb);
+    callback(start, startPath, this);
+    walkIterative(start->subdir_pos, startPath, callback);
+    walkIterative(start->data_pos, startPath, callback);
 }
 
-void iNode::walkIterative(size_t startPos, const std::string &basePath, WalkCallback cb) {
+void iNode::walkIterative(size_t startPos, const std::string &basePath, const WalkCallback &cb) {
     struct Entry {
         size_t pos;
         std::string path;
@@ -931,9 +888,14 @@ void iNode::walkIterative(size_t startPos, const std::string &basePath, WalkCall
         if (!block) continue;
 
         std::string name = block->getPlainName();
-        std::string newPath = (currentPath.empty() || currentPath == "/")
-                                  ? name
-                                  : currentPath + "/" + name;
+        std::string newPath = currentPath;
+        if (newPath.empty() || newPath == "/") {
+            newPath = name;
+        } else {
+            newPath.reserve(newPath.size() + 1 + name.size());
+            newPath += '/';
+            newPath += name;
+        }
 
         cb(block, newPath, this);
 
@@ -951,8 +913,7 @@ void iNode::walkIterative(size_t startPos, const std::string &basePath, WalkCall
 
 iNode::Stats iNode::getStats() const {
     Stats s = {0, 0, 0, 0, 0};
-    s.totalSize = storage_.getFileSize();
-    s.freeSpace = storage_.getFreeSpace();
+    s.totalSize = storage_.size();
 
     const_cast<iNode *>(this)->walk([&s](Block *b, const std::string &, iNode *) {
         if (b->isFile) {
@@ -963,6 +924,8 @@ iNode::Stats iNode::getStats() const {
             s.usedSpace += sizeof(Block);
         }
     });
+
+    s.freeSpace = (s.totalSize > s.usedSpace) ? (s.totalSize - s.usedSpace) : 0;
     return s;
 }
 
@@ -971,14 +934,13 @@ void iNode::printStats() const {
     std::cout << "\n═══════════════ LockBox Statistics ═══════════════\n"
             << "  Total size:    " << totalSize << " bytes\n"
             << "  Used space:    " << usedSpace << " bytes\n"
-            << "  Free space:    " << freeSpace << " bytes\n"
+            << "  Free space:    " << freeSpace << " bytes (reclaimable via defragment)\n"
             << "  Directories:   " << dirCount << "\n"
             << "  Files:         " << fileCount << "\n"
-            << "  Fragments:     " << storage_.getFragmentCount() << "\n"
             << "══════════════════════════════════════════════════\n";
 }
 
-void iNode::display() {
+void iNode::display() const {
     syncRoot();
     std::cout << "══════════════════════════════════════════════════════════════\n"
             << "iNode Structure:\n"
@@ -993,7 +955,7 @@ void iNode::display() {
     };
     std::vector<PrintEntry> stack;
 
-    auto addChildren = [&](Block *b, int depth, std::vector<bool> cont) {
+    auto addChildren = [&](Block *b, int depth, const std::vector<bool> &cont) {
         std::vector<size_t> children;
         if (b->data_pos) children.push_back(b->data_pos);
         if (b->subdir_pos) children.push_back(b->subdir_pos);
@@ -1011,7 +973,7 @@ void iNode::display() {
         if (!block) continue;
 
         for (int i = 0; i < e.depth - 1; i++)
-            std::cout << (i < (int) e.cont.size() && e.cont[i] ? "│   " : "    ");
+            std::cout << (i < static_cast<int>(e.cont.size()) && e.cont[i] ? "│   " : "    ");
         std::cout << (e.isLast ? "└── " : "├── ");
 
         std::string name = block->getPlainName();
@@ -1057,7 +1019,7 @@ void iNode::exportTo(const std::string &exportPath, const std::string &internalP
         return;
     }
 
-    auto *dirBlock = findBlock(internalPath, false);
+    const auto *dirBlock = findBlock(internalPath, false);
     if (!dirBlock) throw std::runtime_error("Path not found: " + internalPath);
 
     std::string targetPath = exportPath + "/" + dirBlock->getPlainName();
@@ -1067,7 +1029,7 @@ void iNode::exportTo(const std::string &exportPath, const std::string &internalP
     logOperation("EXPORT_DIR", internalPath + " -> " + exportPath);
 }
 
-void iNode::exportIterative(size_t startPos, const std::string &basePath) {
+void iNode::exportIterative(size_t startPos, const std::string &basePath) const {
     struct Entry {
         size_t pos;
         std::string destPath;
@@ -1101,7 +1063,7 @@ void iNode::exportIterative(size_t startPos, const std::string &basePath) {
     }
 }
 
-void iNode::exportSingleFile(Block *block, const std::string &destPath) {
+void iNode::exportSingleFile(Block *block, const std::string &destPath) const {
     if (!block || !block->isFile) return;
     auto [data, size] = readFileData(block);
     if (data && size > 0)
@@ -1118,31 +1080,10 @@ std::unique_ptr<iNode> iNode::buildFromFilesystem(const std::string &fsPath,
     auto node = std::make_unique<iNode>(inodePath, cipherEngine);
 
     if (Filesystem::isDirectory(fsPath)) {
-        // Estimate total size needed
-        size_t totalSize = 0;
-        std::function<void(const std::string &)> estimate = [&](const std::string &path) {
-            for (const auto &entry: Filesystem::listDirectory(path)) {
-                std::string fullPath = path + "/" + entry.name;
-                totalSize += sizeof(Block);
-                if (entry.isDirectory) {
-                    estimate(fullPath);
-                } else {
-                    totalSize += entry.size;
-                }
-            }
-        };
-        estimate(fsPath);
-
-        // Preallocate all at once
-        if (totalSize > 0) {
-            node->preallocate(totalSize);
-        }
-
         node->scanFilesystem(fsPath, "");
     } else if (Filesystem::isFile(fsPath)) {
         auto [size, buffer] = Filesystem::readFile(fsPath);
         if (size > 0) {
-            node->preallocate(size + sizeof(Block));
             node->addFile(Filesystem::getFilename(fsPath), buffer.data(), size);
         }
     } else {
@@ -1176,16 +1117,10 @@ void iNode::scanFilesystem(const std::string &fsPath, const std::string &interna
 // ═══════════════════════════════════════════════════════════════════════════
 
 bool iNode::defragment() const {
-    storage_.defragmentFreeList();
-    storage_.compact();
+    bool result = storage_.defragment();
     storage_.sync();
-    return true;
-}
-
-void iNode::preallocate(size_t bytes) {
-    size_t currentAlloc = storage_.getAllocatedSize();
-    size_t target = currentAlloc + bytes;
-    storage_.reserve(target);
+    syncRoot();
+    return result;
 }
 
 const std::string &iNode::getFilePath() const { return path_; }
@@ -1204,18 +1139,18 @@ std::string iNode::normalizePath(const std::string &path) {
 }
 
 std::string iNode::getParentPath(const std::string &path) {
-    size_t pos = path.rfind('/');
+    const size_t pos = path.rfind('/');
     return (pos == std::string::npos) ? "" : path.substr(0, pos);
 }
 
 std::string iNode::getFileName(const std::string &path) {
-    size_t pos = path.rfind('/');
+    const size_t pos = path.rfind('/');
     return (pos == std::string::npos) ? path : path.substr(pos + 1);
 }
 
 std::string iNode::toLower(const std::string &str) {
     std::string result = str;
     std::transform(result.begin(), result.end(), result.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
+                   [](const unsigned char c) { return std::tolower(c); });
     return result;
 }

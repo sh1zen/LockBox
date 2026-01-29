@@ -1,5 +1,4 @@
-#ifndef LOCKBOX_OES_H
-#define LOCKBOX_OES_H
+#pragma once
 
 #include "m_block.h"
 
@@ -105,5 +104,3 @@ public:
     [[nodiscard]] MBLOCK *get_wKey() const { return wKey ? wKey->clone() : nullptr; }
 #endif
 };
-
-#endif // LOCKBOX_OES_H

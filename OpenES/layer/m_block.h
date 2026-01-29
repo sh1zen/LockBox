@@ -148,7 +148,7 @@ public:
     //  ELEMENT / BLOCK ACCESS
     // ======================================================================
 
-    bool setBlock(size_t pos, m_block value) const;
+    [[nodiscard]] bool setBlock(size_t pos, m_block value) const;
 
     [[nodiscard]] m_block getBlock(size_t pos) const;
 

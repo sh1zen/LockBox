@@ -1,5 +1,4 @@
-#ifndef SPHINX_CIPHER_H
-#define SPHINX_CIPHER_H
+#pragma once
 
 #include <OpenES/layer/raw-layer.h>
 
@@ -78,5 +77,3 @@ namespace SPHINX {
      */
     MBLOCK *decrypt(const MBLOCK *ciphertext, const MBLOCK *key);
 } // namespace SPHINX
-
-#endif // SPHINX_CIPHER_H

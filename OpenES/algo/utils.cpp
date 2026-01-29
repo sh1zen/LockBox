@@ -1,9 +1,11 @@
+#include "utils.h"
+
 #include <memory>
 
 #include "hashing.h"
 #include "m_block.h"
 
-MBLOCK* oes_raw_hmac(const MBLOCK* key, const MBLOCK* data, const size_t hmacLen) {
+MBLOCK *oes_raw_hmac(const MBLOCK *key, const MBLOCK *data, const size_t hmacLen) {
     if (!key || key->isNull() || !data || data->isNull() || hmacLen == 0) {
         return nullptr;
     }

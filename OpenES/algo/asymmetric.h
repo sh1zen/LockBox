@@ -1,5 +1,4 @@
-#ifndef ASYMMETRIC_H
-#define ASYMMETRIC_H
+#pragma once
 
 #include "m_block.h"
 
@@ -21,7 +20,7 @@
  *   delete publicKey;
  *   delete privateKey;
  */
-bool oes_generate_keypair(m_block p, m_block q, MBLOCK** publicKey, MBLOCK** privateKey);
+bool oes_generate_keypair(m_block p, m_block q, MBLOCK **publicKey, MBLOCK **privateKey);
 
 /**
  * Asymmetric encryption/decryption
@@ -34,7 +33,7 @@ bool oes_generate_keypair(m_block p, m_block q, MBLOCK** publicKey, MBLOCK** pri
  *
  * Note: For encryption, use public key. For decryption, use private key.
  */
-MBLOCK* oes_asymmetric(const MBLOCK* data, const MBLOCK* key, m_block seed);
+MBLOCK *oes_asymmetric(const MBLOCK *data, const MBLOCK *key, m_block seed);
 
 /**
  * Encrypt data using public key
@@ -52,7 +51,7 @@ MBLOCK* oes_asymmetric(const MBLOCK* data, const MBLOCK* key, m_block seed);
  *   delete plaintext;
  *   delete encrypted;
  */
-MBLOCK* oes_public_encrypt(const MBLOCK* plaintext, const MBLOCK* publicKey, m_block seed);
+MBLOCK *oes_public_encrypt(const MBLOCK *plaintext, const MBLOCK *publicKey, m_block seed);
 
 /**
  * Decrypt data using private key
@@ -70,7 +69,7 @@ MBLOCK* oes_public_encrypt(const MBLOCK* plaintext, const MBLOCK* publicKey, m_b
  *   delete[] bytes;
  *   delete decrypted;
  */
-MBLOCK* oes_private_decrypt(const MBLOCK* ciphertext, const MBLOCK* privateKey, m_block seed);
+MBLOCK *oes_private_decrypt(const MBLOCK *ciphertext, const MBLOCK *privateKey, m_block seed);
 
 /**
  * Sign data using private key
@@ -87,7 +86,7 @@ MBLOCK* oes_private_decrypt(const MBLOCK* ciphertext, const MBLOCK* privateKey, 
  *   delete data;
  *   delete signature;
  */
-MBLOCK* oes_sign(const MBLOCK* data, const MBLOCK* privateKey);
+MBLOCK *oes_sign(const MBLOCK *data, const MBLOCK *privateKey);
 
 /**
  * Verify signature using public key
@@ -105,7 +104,7 @@ MBLOCK* oes_sign(const MBLOCK* data, const MBLOCK* privateKey);
  *   delete data;
  *   delete signature;
  */
-bool oes_verify(const MBLOCK* data, const MBLOCK* signature, const MBLOCK* publicKey);
+bool oes_verify(const MBLOCK *data, const MBLOCK *signature, const MBLOCK *publicKey);
 
 /**
  * Hybrid encryption: encrypt data with symmetric key, then encrypt key with public key
@@ -126,7 +125,7 @@ bool oes_verify(const MBLOCK* data, const MBLOCK* signature, const MBLOCK* publi
  *   delete symKey;
  *   delete encrypted;
  */
-MBLOCK* oes_hybrid_encrypt(const MBLOCK* plaintext, const MBLOCK* publicKey, const MBLOCK* symmetricKey);
+MBLOCK *oes_hybrid_encrypt(const MBLOCK *plaintext, const MBLOCK *publicKey, const MBLOCK *symmetricKey);
 
 /**
  * Hybrid decryption: decrypt symmetric key with private key, then decrypt data
@@ -143,6 +142,4 @@ MBLOCK* oes_hybrid_encrypt(const MBLOCK* plaintext, const MBLOCK* publicKey, con
  *   delete[] bytes;
  *   delete decrypted;
  */
-MBLOCK* oes_hybrid_decrypt(const MBLOCK* ciphertext, const MBLOCK* privateKey);
-
-#endif // ASYMMETRIC_H
+MBLOCK *oes_hybrid_decrypt(const MBLOCK *ciphertext, const MBLOCK *privateKey);

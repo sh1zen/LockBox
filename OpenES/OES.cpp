@@ -1,11 +1,11 @@
+#include "OES.h"
+
 #include "asymmetric.h"
 #include "block_ciphers.h"
-#include "m_block.h"
 #include "hashing.h"
 #include "utils.h"
 #include "key_management.h"
 #include "oes-exception.h"
-#include "OES.h"
 
 OES::OES() = default;
 
@@ -125,7 +125,6 @@ void OES::resetIV() {
         IV = nullptr;
     }
 }
-
 
 void OES::setIV(m_block *iv, const size_t len) {
     this->resetIV();

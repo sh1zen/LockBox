@@ -1,12 +1,11 @@
-#include <vector>
+#include "key_management.h"
+
 #include <memory>
 
 #include <OpenES/layer/raw-layer.h>
-#include "hashing.h"
-#include "constants.h"
-#include "key_management.h"
-#include "oesMath.h"
-#include "utils.h"
+#include <OpenES/algo/constants.h>
+#include <OpenES/support/oesMath.h>
+#include <OpenES/algo/utils.h>
 
 /**
  * Compute next salt value using bit rotations
@@ -43,7 +42,7 @@ std::vector<MBLOCK *> PBKDF(const MBLOCK &key, size_t outLen, size_t count, m_bl
         }
 
         for (size_t j = 0; j < derived->getLen(); ++j) {
-            derived->setBlock(j, derived->getBlock(j) ^ salt);
+            (void) derived->setBlock(j, derived->getBlock(j) ^ salt);
         }
 
         temp.push_back(std::move(derived));
@@ -98,8 +97,8 @@ MBLOCK *key_expansion(const MBLOCK *key, const size_t outLen, const m_block salt
         return nullptr;
     }
 
-    counterSalt->setBlock(0, salt);
-    counterSalt->setBlock(1, 1);
+    (void) counterSalt->setBlock(0, salt);
+    (void) counterSalt->setBlock(1, 1);
 
     // U1 = HMAC(key, salt || 1)
     std::unique_ptr<MBLOCK> U(oes_raw_hmac(key, counterSalt.get(), outLen));
@@ -168,7 +167,7 @@ MBLOCK *key_scheduler(const MBLOCK *key, const size_t outLen, size_t session) {
         b ^= feedback;
 
         feedback = xtime(b) ^ b; // aggiornamento feedback per il prossimo blocco
-        roundKey->setBlock(i, b);
+        (void) roundKey->setBlock(i, b);
     }
 
     // permutazione finale globale

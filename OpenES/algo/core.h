@@ -1,5 +1,4 @@
-#ifndef LOCKBOX_CCORE_H
-#define LOCKBOX_CCORE_H
+#pragma once
 
 #include "m_block.h"
 
@@ -21,7 +20,7 @@ m_block pseudoHadamardTInv(m_block block);
  *   // data is now correlated
  *   delete data;
  */
-void correlate_data(MBLOCK* data, m_block seed = 0);
+void correlate_data(MBLOCK *data, m_block seed = 0);
 
 /**
  * Apply data uncorrelation/diffusion (inverse direction) - MBLOCK version
@@ -33,7 +32,7 @@ void correlate_data(MBLOCK* data, m_block seed = 0);
  *   uncorrelate_data(data, 0x12345678);
  *   // data is now uncorrelated
  */
-void uncorrelate_data(MBLOCK* data, m_block seed = 0);
+void uncorrelate_data(MBLOCK *data, m_block seed = 0);
 
 /**
  * Apply global diffusion to spread changes across all blocks (forward)
@@ -42,7 +41,7 @@ void uncorrelate_data(MBLOCK* data, m_block seed = 0);
  * @param data Data MBLOCK to diffuse (modified in place)
  * @param seed Seed value for the transformation
  */
-void global_diffuse(MBLOCK* data, m_block seed);
+void global_diffuse(MBLOCK *data, m_block seed);
 
 /**
  * Apply inverse global diffusion (reverse direction)
@@ -50,6 +49,4 @@ void global_diffuse(MBLOCK* data, m_block seed);
  * @param data Data MBLOCK to un-diffuse (modified in place)
  * @param seed Seed value (must match global_diffuse)
  */
-void global_diffuse_inv(MBLOCK* data, m_block seed);
-
-#endif //LOCKBOX_CCORE_H
+void global_diffuse_inv(MBLOCK *data, m_block seed);

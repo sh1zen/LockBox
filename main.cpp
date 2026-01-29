@@ -1,8 +1,7 @@
 #include <filesystem>
 #include <iostream>
-#include <fstream>
-#include <iomanip>
-#include <sstream>
+#include <deque>
+#include <utility>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -19,6 +18,62 @@
 #include "OpenES/layer/interface.h"
 
 namespace fs = std::filesystem;
+
+// ==================== Color Support ====================
+
+class ColorSupport {
+    bool enabled_ = true;
+
+public:
+    ColorSupport() {
+#ifdef _WIN32
+        HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+        DWORD mode;
+        enabled_ = GetConsoleMode(h, &mode) &&
+                   SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+#else
+        const char *term = getenv("TERM");
+        const char *colorterm = getenv("COLORTERM");
+        enabled_ = isatty(STDOUT_FILENO) &&
+                   (colorterm || (term && strstr(term, "color")));
+#endif
+    }
+
+    [[nodiscard]] std::string red(const std::string &s) const { return enabled_ ? "\033[91m" + s + "\033[0m" : s; }
+    [[nodiscard]] std::string green(const std::string &s) const { return enabled_ ? "\033[92m" + s + "\033[0m" : s; }
+    [[nodiscard]] std::string yellow(const std::string &s) const { return enabled_ ? "\033[93m" + s + "\033[0m" : s; }
+    [[nodiscard]] std::string blue(const std::string &s) const { return enabled_ ? "\033[94m" + s + "\033[0m" : s; }
+    [[nodiscard]] std::string cyan(const std::string &s) const { return enabled_ ? "\033[96m" + s + "\033[0m" : s; }
+    [[nodiscard]] std::string bold(const std::string &s) const { return enabled_ ? "\033[1m" + s + "\033[0m" : s; }
+
+    [[nodiscard]] std::string boldGreen(const std::string &s) const {
+        return enabled_ ? "\033[1;32m" + s + "\033[0m" : s;
+    }
+
+    [[nodiscard]] std::string boldBlue(const std::string &s) const {
+        return enabled_ ? "\033[1;34m" + s + "\033[0m" : s;
+    }
+
+    [[nodiscard]] std::string dim(const std::string &s) const { return enabled_ ? "\033[2m" + s + "\033[0m" : s; }
+
+    [[nodiscard]] std::string progressBar(float p) const {
+        if (!enabled_) {
+            const int pos = static_cast<int>(40 * p);
+            std::string bar(pos, '#');
+            bar += std::string(40 - pos, ' ');
+            return "[" + bar + "]";
+        }
+        const std::string col = p < 0.3 ? "\033[91m" : p < 0.7 ? "\033[93m" : "\033[92m";
+        const int pos = static_cast<int>(40 * p);
+        std::string bar;
+        for (int i = 0; i < 40; i++) bar += (i < pos ? "█" : i == pos ? "▶" : " ");
+        return "[" + col + bar + "\033[0m]";
+    }
+
+    [[nodiscard]] bool isEnabled() const { return enabled_; }
+};
+
+static ColorSupport g_colors;
 
 // ==================== Pre-calculation Structures ====================
 
@@ -40,7 +95,7 @@ struct PreCalculatedBatch {
         totalSize = fileCount = dirCount = 0;
     }
 
-    size_t getAllocationSize() const {
+    [[nodiscard]] size_t getAllocationSize() const {
         return static_cast<size_t>(totalSize * 1.2) + (fileCount + dirCount) * 512;
     }
 };
@@ -49,10 +104,8 @@ void scanAndCalculate(const std::string &fsPath, const std::string &basePath, Pr
     for (const auto &e: Filesystem::listDirectory(fsPath)) {
         std::string fullFsPath = Filesystem::joinPath(fsPath, e.name);
         std::string internalPath = basePath.empty() ? e.name : basePath + "/" + e.name;
-
         FileEntry fe{fullFsPath, internalPath, e.isDirectory ? 0 : Filesystem::getFileSize(fullFsPath), e.isDirectory};
         batch.entries.push_back(fe);
-
         if (e.isDirectory) {
             batch.dirCount++;
             scanAndCalculate(fullFsPath, internalPath, batch);
@@ -123,7 +176,7 @@ std::string getInput(const std::string &prompt) {
 }
 
 void pressEnterToContinue() {
-    std::cout << "\nPremi INVIO per continuare...";
+    std::cout << "\nPress ENTER to continue...";
     std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
 }
 
@@ -140,29 +193,39 @@ std::string formatSize(size_t bytes) {
     return oss.str();
 }
 
+void printSuccess(const std::string &msg) { std::cout << g_colors.green("[OK] ") << msg << "\n"; }
+
+void printError(const std::string &msg, const std::string &hint = "") {
+    std::cout << g_colors.red("[ERROR] ") << msg << "\n";
+    if (!hint.empty()) std::cout << g_colors.dim("  Hint: " + hint) << "\n";
+}
+
+void printWarning(const std::string &msg) { std::cout << g_colors.yellow("[WARN] ") << msg << "\n"; }
+void printInfo(const std::string &msg) { std::cout << g_colors.cyan("[INFO] ") << msg << "\n"; }
+
 class ProgressTracker {
     std::chrono::steady_clock::time_point start_ = std::chrono::steady_clock::now();
     int total_;
     std::string op_;
+    bool showProgress_;
 
 public:
-    ProgressTracker(int t, const std::string &o) : total_(t), op_(o) {
+    ProgressTracker(int t, std::string o, bool show = true)
+        : total_(t), op_(std::move(o)), showProgress_(show && t > 5) {
     }
 
     void update(int cur) const {
+        if (!showProgress_) return;
         float p = total_ > 0 ? float(cur) / total_ : 0;
-        int pos = int(40 * p);
-        std::cout << "\r" << op_ << ": [" << (p < 0.3 ? "\033[91m" : p < 0.7 ? "\033[93m" : "\033[92m");
-        for (int i = 0; i < 40; i++) std::cout << (i < pos ? "█" : i == pos ? "▶" : " ");
-        std::cout << "\033[0m] " << std::fixed << std::setprecision(1) << p * 100 << "% (" << cur << "/" << total_ <<
-                ")";
+        std::cout << "\r" << op_ << ": " << g_colors.progressBar(p) << " "
+                << std::fixed << std::setprecision(1) << p * 100 << "% (" << cur << "/" << total_ << ")";
         if (cur > 0 && cur < total_) {
-            auto el = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start_).
-                    count();
+            auto el = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - start_).count();
             if (el > 0) {
-                int rem = int((total_ - cur) * el / cur);
-                std::cout << " ETA:" << rem / 60 << ":" << std::setw(2) << std::setfill('0') << rem % 60 <<
-                        std::setfill(' ');
+                int rem = static_cast<int>((total_ - cur) * el / cur);
+                std::cout << " ETA:" << rem / 60 << ":" << std::setw(2) << std::setfill('0')
+                        << rem % 60 << std::setfill(' ');
             }
         }
         std::cout << "     ";
@@ -170,8 +233,10 @@ public:
     }
 
     void finish() const {
-        std::cout << "\r" << op_ <<
-                ": [\033[92m████████████████████████████████████████\033[0m] 100% ✓                \n";
+        if (showProgress_)
+            std::cout << "\r" << op_ << ": " << g_colors.progressBar(1.0) <<
+                    " 100% Done!                \n";
+        else printSuccess(op_ + " completed");
     }
 };
 
@@ -210,8 +275,10 @@ std::vector<std::string> splitCommand(const std::string &cmd) {
 
 void printHeader(const std::string &title) {
     clearScreen();
-    std::cout << "╔════════════════════════════════════════╗\n║" << std::string((40 - title.length()) / 2, ' ') << title
-            << std::string((41 - title.length()) / 2, ' ') << "║\n╚════════════════════════════════════════╝\n\n";
+    std::string line(42, '=');
+    std::cout << "+" << line << "+\n|" << std::string((42 - title.length()) / 2, ' ')
+            << g_colors.bold(title) << std::string((43 - title.length()) / 2, ' ')
+            << "|\n+" << line << "+\n\n";
 }
 
 std::string normalizePath(const std::string &base, const std::string &path) {
@@ -238,6 +305,41 @@ std::string toInternalPath(const std::string &dp) {
     return (dp.empty() || dp == "/") ? "" : (dp[0] == '/' ? dp.substr(1) : dp);
 }
 
+// ==================== Command History ====================
+
+class CommandHistory {
+    std::deque<std::string> history_;
+    size_t maxSize_ = 100;
+    int position_ = -1;
+
+public:
+    void add(const std::string &cmd) {
+        if (cmd.empty() || (!history_.empty() && history_.back() == cmd)) return;
+        history_.push_back(cmd);
+        if (history_.size() > maxSize_) history_.pop_front();
+        position_ = -1;
+    }
+
+    std::string navigateUp(const std::string &current) {
+        if (history_.empty()) return current;
+        if (position_ == -1) position_ = history_.size();
+        if (position_ > 0) position_--;
+        return history_[position_];
+    }
+
+    std::string navigateDown(const std::string &current) {
+        if (history_.empty() || position_ == -1) return current;
+        if (position_ < (int) history_.size() - 1) {
+            position_++;
+            return history_[position_];
+        }
+        position_ = -1;
+        return "";
+    }
+
+    void resetPosition() { position_ = -1; }
+};
+
 // ==================== Line Editor ====================
 
 class LineEditor {
@@ -245,13 +347,14 @@ class LineEditor {
     std::string cwd_, line_;
     size_t cursor_ = 0;
     bool useFs_ = false;
+    CommandHistory history_;
 
-    std::string getLastToken() const {
-        auto p = line_.rfind(' ');
+    [[nodiscard]] std::string getLastToken() const {
+        const auto p = line_.rfind(' ');
         return p == std::string::npos ? line_ : line_.substr(p + 1);
     }
 
-    size_t getLastTokenStart() const {
+    [[nodiscard]] size_t getLastTokenStart() const {
         auto p = line_.rfind(' ');
         return p == std::string::npos ? 0 : p + 1;
     }
@@ -259,10 +362,11 @@ class LineEditor {
     static std::vector<std::string> getFsCompletions(const std::string &partial) {
         std::vector<std::string> c;
         std::string dir, pre;
-        auto ls = partial.rfind('/'), bs = partial.rfind('\\');
-        auto sep = (ls != std::string::npos && bs != std::string::npos)
-                       ? std::max(ls, bs)
-                       : (ls != std::string::npos ? ls : bs);
+        const auto ls = partial.rfind('/');
+        const auto bs = partial.rfind('\\');
+        const auto sep = (ls != std::string::npos && bs != std::string::npos)
+                             ? std::max(ls, bs)
+                             : (ls != std::string::npos ? ls : bs);
         if (sep == std::string::npos) {
             dir = ".";
             pre = partial;
@@ -272,8 +376,7 @@ class LineEditor {
         }
         try {
             for (const auto &e: Filesystem::listDirectory(dir.empty() ? "." : dir))
-                if (
-                    pre.empty() || e.name.find(pre) == 0)
+                if (pre.empty() || e.name.find(pre) == 0)
                     c.push_back(dir + e.name + (e.isDirectory ? "/" : ""));
         } catch (...) {
         }
@@ -281,11 +384,11 @@ class LineEditor {
         return c;
     }
 
-    std::vector<std::string> getLbCompletions(const std::string &partial) const {
+    [[nodiscard]] std::vector<std::string> getLbCompletions(const std::string &partial) const {
         std::vector<std::string> c;
         if (!node_) return c;
         std::string dir, pre;
-        auto ls = partial.rfind('/');
+        const auto ls = partial.rfind('/');
         if (ls == std::string::npos) {
             dir = toInternalPath(cwd_);
             pre = partial;
@@ -296,9 +399,9 @@ class LineEditor {
                       : toInternalPath(normalizePath(cwd_, partial.substr(0, ls)));
         }
         for (const auto &e: node_->listDirectory(dir))
-            if (pre.empty() || e.name.find(pre) == 0)
+            if (pre.empty() || e.plainName.find(pre) == 0)
                 c.push_back(
-                    (ls != std::string::npos ? partial.substr(0, ls + 1) : "") + e.name + (e.isFile ? "" : "/"));
+                    (ls != std::string::npos ? partial.substr(0, ls + 1) : "") + e.plainName + (e.isFile ? "" : "/"));
         std::sort(c.begin(), c.end());
         return c;
     }
@@ -336,8 +439,14 @@ class LineEditor {
         }
     }
 
+    void handleHistory(bool up, const std::string &pr) {
+        line_ = up ? history_.navigateUp(line_) : history_.navigateDown(line_);
+        cursor_ = line_.length();
+        redraw(pr);
+    }
+
 public:
-    LineEditor(iNode *n = nullptr, const std::string &c = "/") : node_(n), cwd_(c), useFs_(n == nullptr) {
+    explicit LineEditor(iNode *n = nullptr, std::string c = "/") : node_(n), cwd_(std::move(c)), useFs_(n == nullptr) {
     }
 
     void setNode(iNode *n) {
@@ -351,13 +460,14 @@ public:
     std::string readLine(const std::string &pr) {
         line_.clear();
         cursor_ = 0;
+        history_.resetPosition();
         std::cout << pr;
         std::cout.flush();
 #ifdef _WIN32
         while (true) {
-            int ch = _getch();
-            if (ch == '\r' || ch == '\n') {
+            if (int ch = _getch(); ch == '\r' || ch == '\n') {
                 std::cout << "\n";
+                history_.add(line_);
                 return line_;
             } else if (ch == '\t') handleTab(pr);
             else if (ch == '\b' || ch == 127) {
@@ -373,21 +483,28 @@ public:
                 } else if (ch == 77 && cursor_ < line_.length()) {
                     cursor_++;
                     std::cout << "\033[C";
-                }
+                } else if (ch == 72) handleHistory(true, pr);
+                else if (ch == 80) handleHistory(false, pr);
             } else if (ch >= 32) {
                 line_.insert(cursor_++, 1, char(ch));
                 redraw(pr);
             }
         }
 #else
-        termios o, n; tcgetattr(STDIN_FILENO, &o); n = o; n.c_lflag &= ~(ICANON | ECHO); n.c_cc[VMIN] = 1;
-        n.c_cc[VTIME] = 0; tcsetattr(STDIN_FILENO, TCSANOW, &n);
+        termios o, n;
+        tcgetattr(STDIN_FILENO, &o);
+        n = o;
+        n.c_lflag &= ~(ICANON | ECHO);
+        n.c_cc[VMIN] = 1;
+        n.c_cc[VTIME] = 0;
+        tcsetattr(STDIN_FILENO, TCSANOW, &n);
         while (true) {
             char ch;
             read(STDIN_FILENO, &ch, 1);
             if (ch == '\n' || ch == '\r') {
                 std::cout << "\n";
                 tcsetattr(STDIN_FILENO, TCSANOW, &o);
+                history_.add(line_);
                 return line_;
             } else if (ch == '\t') handleTab(pr);
             else if (ch == 127 || ch == '\b') {
@@ -405,7 +522,8 @@ public:
                     } else if (s[1] == 'C' && cursor_ < line_.length()) {
                         cursor_++;
                         std::cout << "\033[C";
-                    }
+                    } else if (s[1] == 'A') handleHistory(true, pr);
+                    else if (s[1] == 'B') handleHistory(false, pr);
                     std::cout.flush();
                 }
             } else if (ch >= 32) {
@@ -432,32 +550,83 @@ std::string getPathWithCompletion(const std::string &pr) {
 
 bool insertBatchIntoLockbox(iNode *node, const PreCalculatedBatch &batch, bool showProg = true) {
     if (batch.entries.empty()) return true;
-    size_t allocSz = batch.getAllocationSize();
-    if (allocSz > 0) {
-        if (showProg) std::cout << "🔧 Preallocazione " << formatSize(allocSz) << "...\n";
-        node->preallocate(allocSz);
+
+    // Note: preallocate() removed from new iNode interface
+    if (showProg && batch.fileCount > 5) {
+        printInfo("Processing " + formatSize(batch.getAllocationSize()) + " of data...");
     }
 
-    int proc = 0, tot = static_cast<int>(batch.entries.size());
-    std::unique_ptr<ProgressTracker> prog;
-    if (showProg) prog = std::make_unique<ProgressTracker>(tot, "🔐 Inserimento");
+    int proc = 0;
+    const int tot = static_cast<int>(batch.entries.size());
+    const ProgressTracker prog(tot, "Encrypting", showProg);
 
-    for (const auto &e: batch.entries) {
-        if (e.isDirectory) node->addDirectory(e.internalPath);
-        else if (e.size > 0) {
-            auto [sz, buf] = Filesystem::readFile(e.fsPath);
-            std::cout << e.fsPath << std::endl;
+    for (const auto &[fsPath, internalPath, size, isDirectory]: batch.entries) {
+        if (isDirectory) {
+            node->addDirectory(internalPath);
+        } else if (size > 0) {
+            auto [sz, buf] = Filesystem::readFile(fsPath);
             if (sz > 0 && !buf.empty())
                 try {
-                    node->addFile(e.internalPath, buf.data(), sz);
+                    node->addFile(internalPath, buf.data(), sz);
                 } catch (const std::exception &ex) {
-                    std::cerr << "\n❌ " << e.internalPath << ": " << ex.what() << "\n";
+                    printError("Failed: " + internalPath, ex.what());
                 }
         }
-        if (prog) prog->update(++proc);
+        prog.update(++proc);
     }
-    if (prog) prog->finish();
+    prog.finish();
     return true;
+}
+
+// ==================== Help System ====================
+
+struct CommandHelp {
+    std::string name;
+    std::string args;
+    std::string description;
+};
+
+const std::vector<CommandHelp> CLI_COMMANDS = {
+    {"ls", "[path]", "List directory contents"},
+    {"cd", "<path>", "Change current directory"},
+    {"pwd", "", "Print working directory"},
+    {"cat", "<file>", "Display file contents"},
+    {"rm", "<path>", "Remove file or directory (with confirmation)"},
+    {"mkdir", "<path>", "Create a new directory"},
+    {"mv", "<src> <dst>", "Move or rename a file/directory"},
+    {"cp", "<src> <dst>", "Copy a file or directory"},
+    {"rename", "<path> <name>", "Rename a file or directory"},
+    {"find", "<pattern>", "Search for files matching pattern"},
+    {"tree", "[path]", "Display directory tree structure"},
+    {"extract", "[src] <dst>", "Export files to filesystem"},
+    {"add", "<file> [path]", "Add file or directory from filesystem"},
+    {"info", "<path>", "Show detailed information about a path"},
+    {"limit", "[n]", "Set/show max items displayed in ls"},
+    {"clear", "", "Clear the terminal screen"},
+    {"help", "[cmd]", "Show this help or help for specific command"},
+    {"exit", "", "Exit CLI mode and return to menu"},
+};
+
+void printHelp(const std::string &cmd = "") {
+    if (cmd.empty()) {
+        std::cout << g_colors.bold("\nAvailable Commands:\n\n");
+        for (const auto &c: CLI_COMMANDS) {
+            std::cout << "  " << g_colors.green(c.name);
+            if (!c.args.empty()) std::cout << " " << g_colors.dim(c.args);
+            std::cout << "\n      " << c.description << "\n";
+        }
+        std::cout << "\n" << g_colors.dim("Use TAB for auto-completion, UP/DOWN for command history\n");
+    } else {
+        for (const auto &c: CLI_COMMANDS) {
+            if (c.name == cmd) {
+                std::cout << "\n" << g_colors.bold(c.name);
+                if (!c.args.empty()) std::cout << " " << c.args;
+                std::cout << "\n  " << c.description << "\n";
+                return;
+            }
+        }
+        printError("Unknown command: " + cmd, "Type 'help' to see available commands");
+    }
 }
 
 // ==================== Menu Functions ====================
@@ -476,11 +645,15 @@ void managementMenu(iNode *node);
 
 void cliMode(iNode *node);
 
+void printUsage(const char *prog);
+
+int handleArgs(int argc, char *argv[]);
+
 void showMainMenu() {
     while (true) {
-        printHeader("LOCKBOX - Menu Principale");
-        std::cout <<
-                "  [1] Apri LockBox\n  [2] Crea LockBox\n  [3] Cifra testo\n  [4] Decifra testo\n  [0] Esci\n\n>> ";
+        printHeader("LOCKBOX - Main Menu");
+        std::cout << "  [1] Open LockBox\n  [2] Create LockBox\n  [3] Encrypt text\n"
+                << "  [4] Decrypt text\n  [0] Exit\n\n>> ";
         std::string ch;
         std::getline(std::cin, ch);
         if (ch == "1") openLockbox();
@@ -488,104 +661,104 @@ void showMainMenu() {
         else if (ch == "3") encryptText();
         else if (ch == "4") decryptText();
         else if (ch == "0") {
-            std::cout << "Arrivederci!\n";
+            std::cout << "Goodbye!\n";
             return;
         } else {
-            std::cout << "Scelta non valida.\n";
+            printError("Invalid choice", "Enter a number between 0-4");
             pressEnterToContinue();
         }
     }
 }
 
 void openLockbox() {
-    printHeader("Apri LockBox");
-    auto path = getPathWithCompletion("Path del LockBox: ");
+    printHeader("Open LockBox");
+    auto path = getPathWithCompletion("LockBox path: ");
     if (path.empty()) {
-        std::cout << "Path non specificato.\n";
+        printError("No path specified", "Enter the path to your LockBox file");
         pressEnterToContinue();
         return;
     }
     if (!Filesystem::exists(path)) {
-        std::cout << "File non trovato.\n";
+        printError("File not found: " + path, "Check the path and try again");
         pressEnterToContinue();
         return;
     }
     if (Filesystem::isDirectory(path)) {
-        std::cout << "È una directory.\n";
+        printError("Path is a directory", "Specify a LockBox file, not a directory");
         pressEnterToContinue();
         return;
     }
+
     auto pwd = getPassword();
     if (pwd.empty()) {
-        std::cout << "Password vuota.\n";
+        printError("Empty password", "Password is required to open a LockBox");
         pressEnterToContinue();
         return;
     }
+
     auto *oes = new OES();
     oes->set_key(const_cast<char *>(pwd.c_str()));
     oes->extendWKey(OES_NUM_OF_BLOCKS);
     try {
         auto *node = new iNode(path, oes);
-        std::cout << "Aperto!\n";
+        printSuccess("LockBox opened successfully!");
         pressEnterToContinue();
         managementMenu(node);
         delete node;
     } catch (const std::exception &e) {
-        std::cout << "Errore: " << e.what() << "\n";
+        printError("Failed to open LockBox", "Wrong password or corrupted file");
         pressEnterToContinue();
     }
     delete oes;
 }
 
 void createLockbox() {
-    printHeader("Crea LockBox");
-    auto src = getPathWithCompletion("Path sorgente: ");
+    printHeader("Create LockBox");
+    const auto src = getPathWithCompletion("Source path: ");
     if (src.empty() || !Filesystem::exists(src)) {
-        std::cout << "Sorgente non valida.\n";
+        printError("Invalid source path", "Specify an existing file or directory");
         pressEnterToContinue();
         return;
     }
-    auto dst = getPathWithCompletion("Path destinazione: ");
+    auto dst = getPathWithCompletion("Destination path: ");
     if (dst.empty()) {
-        std::cout << "Destinazione non valida.\n";
+        printError("Invalid destination", "Specify where to save the LockBox");
         pressEnterToContinue();
         return;
     }
     if (Filesystem::exists(dst)) {
-        std::cout << "Sovrascrivere? (s/n): ";
+        std::cout << "File exists. Overwrite? (y/n): ";
         std::string c;
         std::getline(std::cin, c);
-        if (c != "s" && c != "S") {
-            std::cout << "Annullato.\n";
+        if (c != "y" && c != "Y") {
+            printInfo("Operation cancelled");
             pressEnterToContinue();
             return;
         }
     }
+
     auto pwd = getPassword();
     if (pwd.empty()) {
-        std::cout << "Password vuota.\n";
+        printError("Empty password");
         pressEnterToContinue();
         return;
     }
     if (pwd.length() < 8) {
-        std::cout << "Password corta, continuare? (s/n): ";
-        std::string c;
-        std::getline(std::cin, c);
-        if (c != "s" && c != "S") return;
+        printWarning("Password is short (< 8 chars).");
     }
-    auto pwd2 = getPassword("Conferma: ");
+    auto pwd2 = getPassword("Confirm password: ");
     if (pwd != pwd2) {
-        std::cout << "Non coincidono.\n";
+        printError("Passwords do not match");
         pressEnterToContinue();
         return;
     }
 
-    std::cout << "\n📊 Scansione...\n";
-    PreCalculatedBatch batch = Filesystem::isDirectory(src)
-                                   ? calculateDirectory(src)
-                                   : calculateSingleFile(src, Filesystem::getFilename(src));
-    std::cout << "📁 " << batch.dirCount << " dir | 📄 " << batch.fileCount << " file | 💾 " <<
-            formatSize(batch.totalSize) << " | 🔧 " << formatSize(batch.getAllocationSize()) << "\n\n";
+    printInfo("Scanning files...");
+    const PreCalculatedBatch batch = Filesystem::isDirectory(src)
+                                         ? calculateDirectory(src)
+                                         : calculateSingleFile(src, Filesystem::getFilename(src));
+    std::cout << "  Directories: " << batch.dirCount << " | Files: " << batch.fileCount
+            << " | Size: " << formatSize(batch.totalSize) << "\n\n";
 
     auto *oes = new OES();
     oes->set_key(const_cast<char *>(pwd.c_str()));
@@ -593,34 +766,35 @@ void createLockbox() {
     try {
         auto *node = new iNode(dst, oes);
         insertBatchIntoLockbox(node, batch, true);
-        std::cout << "💾 Salvataggio...\n";
+        printInfo("Saving LockBox...");
         node->save();
-        std::cout << "\n✅ Creato!\n";
+        printSuccess("LockBox created successfully!");
         pressEnterToContinue();
         managementMenu(node);
         delete node;
     } catch (const std::exception &e) {
-        std::cout << "Errore: " << e.what() << "\n";
+        printError("Failed to create LockBox", e.what());
         pressEnterToContinue();
     }
     delete oes;
 }
 
 void encryptText() {
-    printHeader("Cifra Testo");
-    auto txt = getInput("Testo: ");
+    printHeader("Encrypt Text");
+    auto txt = getInput("Text to encrypt: ");
     if (txt.empty()) {
-        std::cout << "Vuoto.\n";
+        printError("No text provided");
         pressEnterToContinue();
         return;
     }
-    auto pwd = getPassword();
+    const auto pwd = getPassword();
     if (pwd.empty()) {
-        std::cout << "Password vuota.\n";
+        printError("Empty password");
         pressEnterToContinue();
         return;
     }
-    auto iv = getInput("IV (opz): ");
+    auto iv = getInput("IV (optional, press Enter to skip): ");
+
     auto *oes = new OES();
     oes->set_key(const_cast<char *>(pwd.c_str()));
     oes->extendWKey(OES_NUM_OF_BLOCKS);
@@ -637,26 +811,39 @@ void encryptText() {
         if (auto *cb = oes->get_cipherBlock(); cb && !cb->isNull()) {
             auto [d, s] = exportBlock(cb, OES_TYPE_HEX);
             if (auto h = static_cast<char *>(d)) {
-                std::cout << "\n✅ " << h << "\n";
+                printSuccess("Encrypted:");
+                std::cout << "\n" << h << "\n";
                 free(h);
             }
         }
-    } catch (const std::exception &e) { std::cout << "❌ " << e.what() << "\n"; }
+    } catch (const std::exception &e) { printError("Encryption failed", e.what()); }
     delete oes;
     pressEnterToContinue();
 }
 
 void decryptText() {
-    printHeader("Decifra Testo");
-    auto hex = getInput("Hex: ");
-    auto pwd = getPassword();
-    auto iv = getInput("IV (opz): ");
-    auto *ib = importBlock(hex.c_str(), hex.length(), OES_TYPE_HEX);
-    if (!ib) {
-        std::cout << "Hex invalido.\n";
+    printHeader("Decrypt Text");
+    auto hex = getInput("Hex ciphertext: ");
+    if (hex.empty()) {
+        printError("No ciphertext provided");
         pressEnterToContinue();
         return;
     }
+    auto pwd = getPassword();
+    if (pwd.empty()) {
+        printError("Empty password");
+        pressEnterToContinue();
+        return;
+    }
+    auto iv = getInput("IV (optional, press Enter to skip): ");
+
+    auto *ib = importBlock(hex.c_str(), hex.length(), OES_TYPE_HEX);
+    if (!ib) {
+        printError("Invalid hex format", "Ensure the ciphertext is valid hexadecimal");
+        pressEnterToContinue();
+        return;
+    }
+
     auto *oes = new OES();
     oes->set_key(const_cast<char *>(pwd.c_str()));
     oes->extendWKey(OES_NUM_OF_BLOCKS);
@@ -671,62 +858,81 @@ void decryptText() {
     oes->dec_adv();
     if (auto *pb = oes->get_plainBlock(); pb && !pb->isNull()) {
         auto r = pb->toBytes();
-        std::cout << "\nDecifrato: ";
+        printSuccess("Decrypted:");
+        std::cout << "\n";
         std::cout.write(reinterpret_cast<char *>(r.first), r.second);
         std::cout << "\n";
         delete[] r.first;
-    }
+    } else { printError("Decryption failed", "Wrong password or corrupted data"); }
     delete oes;
     pressEnterToContinue();
 }
 
 void managementMenu(iNode *node) {
     while (true) {
-        printHeader("Gestione LockBox");
+        printHeader("LockBox Management");
         node->printStats();
-        std::cout << "\n  [1] Estrai  [2] CLI  [3] Cerca  [4] Defrag  [5] Log  [6] Pulisci Log  [0] Salva/Esci\n\n>> ";
+        std::cout << "\n  [1] Extract   [2] CLI Mode   [3] Search   [4] Defragment\n"
+                << "  [5] View Log  [6] Clear Log  [0] Save & Exit\n\n>> ";
         std::string cmd;
         std::getline(std::cin, cmd);
         auto tk = splitCommand(cmd);
         if (tk.empty()) continue;
+
         if (tk[0] == "0") {
             node->save();
-            std::cout << "Salvato!\n";
+            printSuccess("LockBox saved successfully!");
             pressEnterToContinue();
             return;
-        } else if (tk[0] == "1") {
+        }
+
+        if (tk[0] == "1") {
             auto pp = tk.size() > 1 ? tk[1] : "";
-            auto dest = getPathWithCompletion("Destinazione: ");
+            auto dest = getPathWithCompletion("Destination folder: ");
+            if (dest.empty()) {
+                printError("No destination specified");
+                pressEnterToContinue();
+                continue;
+            }
             if (!Filesystem::exists(dest)) Filesystem::createDirectory(dest, true);
             try {
                 node->exportTo(dest, pp);
-                std::cout << "✅ Estratto in " << dest << "\n";
-            } catch (const std::exception &e) { std::cout << "❌ " << e.what() << "\n"; }
+                printSuccess("Extracted to " + dest);
+            } catch (const std::exception &e) { printError("Extraction failed", e.what()); }
             pressEnterToContinue();
         } else if (tk[0] == "2") cliMode(node);
         else if (tk[0] == "3") {
-            if (tk.size() < 2) std::cout << "Specifica nome.\n";
-            else {
+            if (tk.size() < 2) { printError("No search term", "Usage: 3 <filename>"); } else {
                 auto r = node->search(tk[1], false);
-                if (r.empty()) std::cout << "Nessun risultato.\n";
-                else for (const auto &p: r) std::cout << (node->exists(p, true) ? "📄 " : "📁 ") << p << "\n";
+                if (r.empty()) printInfo("No results found for: " + tk[1]);
+                else {
+                    printSuccess("Found " + std::to_string(r.size()) + " result(s):");
+                    for (const auto &p: r)
+                        std::cout << "  " << (node->exists(p, true) ? "📄 " : "📁 ") << p << "\n";
+                }
             }
             pressEnterToContinue();
         } else if (tk[0] == "4") {
-            std::cout << (node->defragment() ? "Defrag OK.\n" : "Errore.\n");
+            printInfo("Running defragmentation...");
+            if (node->defragment()) printSuccess("Defragmentation completed");
+            else printError("Defragmentation failed");
             pressEnterToContinue();
         } else if (tk[0] == "5") {
-            std::cout << "\n═══ LOG ═══\n" << node->getLog() << "════════════\n" << formatSize(node->getLogSize()) <<
-                    "\n";
+            std::cout << "\n" << g_colors.bold("=== Activity Log ===") << "\n"
+                    << node->getLog() << g_colors.bold("====================") << "\n"
+                    << "Log size: " << formatSize(node->getLogSize()) << "\n";
             pressEnterToContinue();
         } else if (tk[0] == "6") {
-            std::cout << "Pulire? (s/n): ";
+            std::cout << "Clear activity log? (y/n): ";
             std::string c;
             std::getline(std::cin, c);
-            if (c == "s" || c == "S") {
+            if (c == "y" || c == "Y") {
                 node->clearLog();
-                std::cout << "OK.\n";
+                printSuccess("Log cleared");
             }
+            pressEnterToContinue();
+        } else {
+            printError("Invalid option");
             pressEnterToContinue();
         }
     }
@@ -741,47 +947,52 @@ void cliMode(iNode *node) {
     auto listDir = [&](const std::string &pp) {
         auto ent = node->listDirectory(pp);
         if (ent.empty()) {
-            std::cout << "  (vuota)\n";
+            std::cout << "  (empty directory)\n";
             return;
         }
-        std::sort(ent.begin(), ent.end(), [](auto &a, auto &b) {
-            return a.isFile != b.isFile ? !a.isFile : a.name < b.name;
+        // Sort: directories first (isFile=false), then by name
+        std::sort(ent.begin(), ent.end(), [](const iNode::DirEntry &a, const iNode::DirEntry &b) {
+            return a.isFile != b.isFile ? a.isFile < b.isFile : a.plainName < b.plainName;
         });
         int sh = 0;
         for (const auto &e: ent) {
             if (sh >= maxIt) {
-                std::cout << "  ... altri " << ent.size() - maxIt << "\n";
+                std::cout << g_colors.dim("  ... " + std::to_string(ent.size() - maxIt) + " more items\n");
                 break;
             }
-            std::cout << (e.isFile ? "  📄 " : "  📁 ") << e.name << (e.isFile ? " (" + formatSize(e.size) + ")" : "/")
-                    << "\n";
+            std::cout << (e.isFile ? "  📄 " : "  📁 ") << e.plainName
+                    << (e.isFile ? " (" + formatSize(e.size) + ")" : "/") << "\n";
             sh++;
         }
-        std::cout << "Tot: " << ent.size() << "\n";
+        std::cout << g_colors.dim("Total: " + std::to_string(ent.size()) + " items\n");
     };
+
     clearScreen();
-    std::cout <<
-            "╔════════════════════════════════════════╗\n║         LockBox CLI Mode               ║\n╚════════════════════════════════════════╝\n'help' per comandi.\n";
+    std::cout << g_colors.bold("\n=== LockBox CLI Mode ===\n")
+            << g_colors.dim("Type 'help' for commands, 'exit' to return to menu\n\n");
+
     while (true) {
         ed.setCwd(cwd);
-        auto cl = ed.readLine("\033[1;32mlockbox\033[0m:\033[1;34m" + cwd + "\033[0m$ ");
+        std::string prompt = g_colors.boldGreen("lockbox") + ":" + g_colors.boldBlue(cwd) + "$ ";
+        auto cl = ed.readLine(prompt);
         auto tk = splitCommand(cl);
         if (tk.empty()) continue;
         std::string cmd = tk[0];
         std::transform(cmd.begin(), cmd.end(), cmd.begin(), ::tolower);
+
         if (cmd == "exit" || cmd == "quit") return;
-        else if (cmd == "help")
-            std::cout << "ls cd pwd cat rm mkdir mv cp rename find tree extract add limit clear info\n";
+
+        if (cmd == "help") printHelp(tk.size() > 1 ? tk[1] : "");
         else if (cmd == "clear" || cmd == "cls") clearScreen();
         else if (cmd == "pwd") std::cout << cwd << "\n";
         else if (cmd == "ls") {
             auto td = tk.size() > 1 ? toDisp(tk[1]) : cwd;
             auto tp = toInternalPath(td);
             if (!tp.empty() && !node->exists(tp, false)) {
-                std::cout << "Non trovata.\n";
+                printError("Directory not found: " + td);
                 continue;
             }
-            std::cout << td << ":\n";
+            std::cout << g_colors.bold(td + ":\n");
             listDir(tp);
         } else if (cmd == "cd") {
             if (tk.size() < 2 || tk[1] == "/") cwd = "/";
@@ -789,19 +1000,19 @@ void cliMode(iNode *node) {
                 auto nd = toDisp(tk[1]);
                 auto np = toInternalPath(nd);
                 if (nd != "/" && !np.empty() && !node->exists(np, false)) {
-                    std::cout << "Non trovata.\n";
+                    printError("Directory not found: " + nd, "Use 'ls' to see available directories");
                     continue;
                 }
                 cwd = nd;
             }
         } else if (cmd == "cat") {
             if (tk.size() < 2) {
-                std::cout << "Uso: cat <file>\n";
+                printError("Missing argument", "Usage: cat <filename>");
                 continue;
             }
             auto tp = toInt(tk[1]);
             if (!node->exists(tp, true)) {
-                std::cout << "Non trovato.\n";
+                printError("File not found: " + tk[1]);
                 continue;
             }
             auto [d, s] = node->readFile(tp);
@@ -812,70 +1023,80 @@ void cliMode(iNode *node) {
             }
         } else if (cmd == "rm") {
             if (tk.size() < 2) {
-                std::cout << "Uso: rm <path>\n";
+                printError("Missing argument", "Usage: rm <path>");
                 continue;
             }
             auto tp = toInt(tk[1]);
             if (!node->exists(tp, true) && !node->exists(tp, false)) {
-                std::cout << "Non trovato.\n";
+                printError("Not found: " + tk[1]);
                 continue;
             }
-            std::cout << "Eliminare? (s/n): ";
+            std::cout << "Delete '" << tk[1] << "'? (y/n): ";
             std::string c;
             std::getline(std::cin, c);
-            if (c == "s" || c == "S") std::cout << (node->remove(tp) ? "OK.\n" : "Errore.\n");
+            if (c == "y" || c == "Y") {
+                if (node->remove(tp)) printSuccess("Deleted: " + tk[1]);
+                else printError("Failed to delete");
+            } else printInfo("Cancelled");
         } else if (cmd == "mkdir") {
             if (tk.size() < 2) {
-                std::cout << "Uso: mkdir <path>\n";
+                printError("Missing argument", "Usage: mkdir <dirname>");
                 continue;
             }
-            std::cout << (node->addDirectory(toInt(tk[1])) ? "Creata.\n" : "Errore.\n");
+            if (node->addDirectory(toInt(tk[1])) != 0) printSuccess("Directory created: " + tk[1]);
+            else printError("Failed to create directory", "Check if path already exists");
         } else if (cmd == "mv") {
             if (tk.size() < 3) {
-                std::cout << "Uso: mv <src> <dst>\n";
+                printError("Missing arguments", "Usage: mv <source> <destination>");
                 continue;
             }
-            std::cout << (node->move(toInt(tk[1]), toInt(tk[2])) ? "OK.\n" : "Errore.\n");
+            if (node->move(toInt(tk[1]), toInt(tk[2]))) printSuccess("Moved successfully");
+            else printError("Move failed", "Check that source exists and destination is valid");
         } else if (cmd == "cp") {
             if (tk.size() < 3) {
-                std::cout << "Uso: cp <src> <dst>\n";
+                printError("Missing arguments", "Usage: cp <source> <destination>");
                 continue;
             }
-            std::cout << (node->copy(toInt(tk[1]), toInt(tk[2])) ? "OK.\n" : "Errore.\n");
+            if (node->copy(toInt(tk[1]), toInt(tk[2]))) printSuccess("Copied successfully");
+            else printError("Copy failed", "Check that source exists");
         } else if (cmd == "rename") {
             if (tk.size() < 3) {
-                std::cout << "Uso: rename <path> <nome>\n";
+                printError("Missing arguments", "Usage: rename <path> <newname>");
                 continue;
             }
-            std::cout << (node->rename(toInt(tk[1]), tk[2]) ? "OK.\n" : "Errore.\n");
+            if (node->rename(toInt(tk[1]), tk[2])) printSuccess("Renamed successfully");
+            else printError("Rename failed");
         } else if (cmd == "find") {
             if (tk.size() < 2) {
-                std::cout << "Uso: find <nome>\n";
+                printError("Missing argument", "Usage: find <pattern>");
                 continue;
             }
-            auto r = node->search(tk[1], false);
-            if (r.empty()) std::cout << "Nessun risultato.\n";
-            else for (const auto &x: r) std::cout << (node->exists(x, true) ? "📄 " : "📁 ") << x << "\n";
+            if (auto r = node->search(tk[1], false); r.empty()) printInfo("No matches found for: " + tk[1]);
+            else {
+                printSuccess("Found " + std::to_string(r.size()) + " match(es):");
+                for (const auto &x: r) std::cout << "  " << (node->exists(x, true) ? "📄 " : "📁 ") << x << "\n";
+            }
         } else if (cmd == "tree") {
             auto td = tk.size() > 1 ? toDisp(tk[1]) : cwd;
             auto tp = toInternalPath(td);
             if (!tp.empty() && !node->exists(tp, false)) {
-                std::cout << "Non trovato.\n";
+                printError("Directory not found: " + td);
                 continue;
             }
-            std::cout << td << "\n";
+            std::cout << g_colors.bold(td) << "\n";
             std::function<void(const std::string &, const std::string &)> pt = [&
                     ](const std::string &pp, const std::string &pf) {
                 auto ent = node->listDirectory(pp);
-                std::sort(ent.begin(), ent.end(), [](auto &a, auto &b) {
-                    return a.isFile != b.isFile ? !a.isFile : a.name < b.name;
+                // Sort: directories first (isFile=false), then by name
+                std::sort(ent.begin(), ent.end(), [](const iNode::DirEntry &a, const iNode::DirEntry &b) {
+                    return a.isFile != b.isFile ? a.isFile < b.isFile : a.plainName < b.plainName;
                 });
                 for (size_t i = 0; i < ent.size(); i++) {
                     bool last = i == ent.size() - 1;
-                    std::cout << pf << (last ? "└── " : "├── ") << (ent[i].isFile ? "📄 " : "📁 ") << ent[i].name << (
-                        ent[i].isFile ? "" : "/") << "\n";
+                    std::cout << pf << (last ? "└── " : "├── ") << (ent[i].isFile ? "📄 " : "📁 ")
+                            << ent[i].plainName << (ent[i].isFile ? "" : "/") << "\n";
                     if (!ent[i].isFile)
-                        pt(pp.empty() ? ent[i].name : pp + "/" + ent[i].name,
+                        pt(pp.empty() ? ent[i].plainName : pp + "/" + ent[i].plainName,
                            pf + (last ? "    " : "│   "));
                 }
             };
@@ -889,22 +1110,22 @@ void cliMode(iNode *node) {
                 pp = toInt(tk[1]);
                 ep = tk[2];
             } else {
-                std::cout << "Uso: extract [path] <dst>\n";
+                printError("Missing arguments", "Usage: extract [source] <destination>");
                 continue;
             }
             if (!Filesystem::exists(ep)) Filesystem::createDirectory(ep, true);
             try {
                 node->exportTo(ep, pp);
-                std::cout << "✅ " << ep << "\n";
-            } catch (const std::exception &e) { std::cout << "❌ " << e.what() << "\n"; }
+                printSuccess("Extracted to: " + ep);
+            } catch (const std::exception &e) { printError("Extraction failed", e.what()); }
         } else if (cmd == "a" || cmd == "add") {
             if (tk.size() < 2) {
-                std::cout << "Uso: add <file_ext> [path_int]\n";
+                printError("Missing arguments", "Usage: add <external_path> [internal_path]");
                 continue;
             }
             const auto &ext = tk[1];
             if (!Filesystem::exists(ext)) {
-                std::cout << "Non trovato.\n";
+                printError("File not found: " + ext);
                 continue;
             }
             std::string fn = Filesystem::getFilename(ext), ip;
@@ -914,48 +1135,172 @@ void cliMode(iNode *node) {
                 else if (node->exists(toInt(ia), false)) ip = toInt(ia + "/" + fn);
                 else ip = toInt(ia);
             } else ip = toInt(fn);
-            // Pre-calcola e prealloca
-            std::cout << "📊 Calcolo...\n";
+            printInfo("Scanning...");
             PreCalculatedBatch batch;
             if (Filesystem::isDirectory(ext)) batch = calculateDirectory(ext);
             else batch = calculateSingleFile(ext, ip);
-            std::cout << "💾 " << formatSize(batch.totalSize) << " | 🔧 " << formatSize(batch.getAllocationSize()) <<
-                    "\n";
-            // Aggiorna path interni se era directory
+            std::cout << "  Size: " << formatSize(batch.totalSize) << " | Files: " << batch.fileCount << "\n";
             if (Filesystem::isDirectory(ext))
-                for (auto &e: batch.entries)
-                    e.internalPath = (ip.empty() ? "" : ip + "/") + e.internalPath;
+                for (auto &e: batch.entries) e.internalPath = (ip.empty() ? "" : ip + "/") + e.internalPath;
             insertBatchIntoLockbox(node, batch, true);
         } else if (cmd == "limit") {
-            if (tk.size() < 2) std::cout << "Limite: " << maxIt << "\n";
+            if (tk.size() < 2) std::cout << "Current limit: " << maxIt << " items\n";
             else {
                 try {
                     maxIt = std::max(1, std::stoi(tk[1]));
-                    std::cout << "OK: " << maxIt << "\n";
-                } catch (...) { std::cout << "Numero invalido.\n"; }
+                    printSuccess("Limit set to " + std::to_string(maxIt));
+                } catch (...) { printError("Invalid number", "Usage: limit <number>"); }
             }
         } else if (cmd == "info") {
             if (tk.size() < 2) {
-                std::cout << "Uso: info <path>\n";
+                printError("Missing argument", "Usage: info <path>");
                 continue;
             }
             auto td = toDisp(tk[1]);
             auto tp = toInternalPath(td);
-            bool isF = node->exists(tp, true), isD = !isF && (td == "/" || tp.empty() || node->exists(tp, false));
-            if (!isF && !isD) {
-                std::cout << "Non trovato.\n";
+            bool isF = node->exists(tp, true);
+            if (bool isD = !isF && (td == "/" || tp.empty() || node->exists(tp, false)); !isF && !isD) {
+                printError("Not found: " + td);
                 continue;
             }
-            std::cout << "\n  Path: " << td << "\n  Tipo: " << (isF ? "📄 File" : "📁 Dir") << "\n";
-        } else std::cout << "Comando sconosciuto.\n";
+            std::cout << "\n  Path: " << td << "\n  Type: " << (isF ? "File" : "Directory") << "\n";
+        } else printError("Unknown command: " + cmd, "Type 'help' for available commands");
     }
 }
 
-int main(int argc, char *argv[]) {
+// ==================== Command Line Arguments ====================
+
+void printUsage(const char *prog) {
+    std::cout << g_colors.bold("LockBox\n\n")
+            << "Usage:\n"
+            << "  [no args]                        Interactive mode\n"
+            << "  <source> <lockbox> <pass>        Create lockbox from source\n"
+            << "  -e <lockbox> <dest> <pass>       Extract lockbox to destination\n"
+            << "  -c <text> <password>             Encrypt text\n"
+            << "  -d <hex> <password>              Decrypt hex ciphertext\n"
+            << "  -h                               Show this help\n\n";
+}
+
+int handleArgs(int argc, char *argv[]) {
+    const std::string arg1 = argv[1];
+
+    if (arg1 == "-h" || arg1 == "--help") {
+        printUsage(argv[0]);
+        return 0;
+    }
+
+    if (arg1 == "-c" && argc >= 4) {
+        auto *oes = new OES();
+        oes->set_key(argv[3]);
+        oes->extendWKey(OES_NUM_OF_BLOCKS);
+        try {
+            oes->load_data_raw(argv[2], strlen(argv[2]));
+            oes->enc_adv();
+            if (auto *cb = oes->get_cipherBlock(); cb && !cb->isNull()) {
+                auto [d, s] = exportBlock(cb, OES_TYPE_HEX);
+                if (const auto h = static_cast<char *>(d)) {
+                    std::cout << h << "\n";
+                    free(h);
+                }
+            }
+        } catch (const std::exception &e) {
+            printError("Encryption failed", e.what());
+            delete oes;
+            return 1;
+        }
+        delete oes;
+        return 0;
+    }
+
+    if (arg1 == "-d" && argc >= 4) {
+        auto *ib = importBlock(argv[2], strlen(argv[2]), OES_TYPE_HEX);
+        if (!ib) {
+            printError("Invalid hex input");
+            return 1;
+        }
+        auto *oes = new OES();
+        oes->set_key(argv[3]);
+        oes->extendWKey(OES_NUM_OF_BLOCKS);
+        oes->load_cipher_block(ib, true);
+        oes->dec_adv();
+        if (const auto *pb = oes->get_plainBlock(); pb && !pb->isNull()) {
+            auto [data, size] = pb->toBytes();
+            std::cout.write(reinterpret_cast<char *>(data), size);
+            std::cout << "\n";
+            delete[] data;
+        } else {
+            printError("Decryption failed");
+            delete oes;
+            return 1;
+        }
+        delete oes;
+        return 0;
+    }
+
+    if (arg1 == "-e" && argc >= 5) {
+        if (!Filesystem::exists(argv[2])) {
+            printError("LockBox not found: " + std::string(argv[2]));
+            return 1;
+        }
+        auto *oes = new OES();
+        oes->set_key(argv[4]);
+        oes->extendWKey(OES_NUM_OF_BLOCKS);
+        try {
+            auto *node = new iNode(argv[2], oes);
+            if (!Filesystem::exists(argv[3])) Filesystem::createDirectory(argv[3], true);
+            node->exportTo(argv[3], "");
+            printSuccess("Extracted to: " + std::string(argv[3]));
+            delete node;
+        } catch (const std::exception &e) {
+            printError("Export failed", e.what());
+            delete oes;
+            return 1;
+        }
+        delete oes;
+        return 0;
+    }
+
+    if (argc >= 4) {
+        if (!Filesystem::exists(argv[1])) {
+            printError("Source not found: " + std::string(argv[1]));
+            return 1;
+        }
+        printInfo("Scanning files...");
+        const PreCalculatedBatch batch = Filesystem::isDirectory(argv[1])
+                                             ? calculateDirectory(argv[1])
+                                             : calculateSingleFile(argv[1], Filesystem::getFilename(argv[1]));
+        std::cout << "  Files: " << batch.fileCount << " | Size: " << formatSize(batch.totalSize) << "\n";
+
+        auto *oes = new OES();
+        oes->set_key(argv[3]);
+        oes->extendWKey(OES_NUM_OF_BLOCKS);
+        try {
+            auto *node = new iNode(argv[2], oes);
+            insertBatchIntoLockbox(node, batch, true);
+            node->save();
+            printSuccess("LockBox created: " + std::string(argv[2]));
+            delete node;
+        } catch (const std::exception &e) {
+            printError("Creation failed", e.what());
+            delete oes;
+            return 1;
+        }
+        delete oes;
+        return 0;
+    }
+
+    printError("Invalid arguments");
+    printUsage(argv[0]);
+    return 1;
+}
+
+int main(const int argc, char *argv[]) {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
 #endif
+
+    if (argc > 1) return handleArgs(argc, argv);
     showMainMenu();
     return 0;
 }

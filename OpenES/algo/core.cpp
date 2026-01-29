@@ -1,10 +1,8 @@
 #include "core.h"
 
 #include "constants.h"
-#include "m_block.h"
 #include "oesMath.h"
 #include "raw-layer.h"
-
 
 // ==========================================
 // COMPACT GENERIC PRNG
@@ -73,7 +71,7 @@ void global_diffuse(MBLOCK *data, const m_block seed) {
     m_block prev = k0;
     for (size_t i = 0; i < len; ++i) {
         const m_block cur = data->getBlock(i);
-        data->setBlock(i, cur ^ mix(prev));
+        (void) data->setBlock(i, cur ^ mix(prev));
         prev = cur;
     }
 
@@ -81,7 +79,7 @@ void global_diffuse(MBLOCK *data, const m_block seed) {
     m_block next = k1;
     for (size_t i = len; i-- > 0;) {
         const m_block cur = data->getBlock(i);
-        data->setBlock(i, cur ^ mix(next));
+        (void) data->setBlock(i, cur ^ mix(next));
         next = cur;
     }
 
@@ -89,7 +87,7 @@ void global_diffuse(MBLOCK *data, const m_block seed) {
     prev = k2;
     for (size_t i = 0; i < len; ++i) {
         const m_block cur = data->getBlock(i);
-        data->setBlock(i, cur ^ mix(prev));
+        (void) data->setBlock(i, cur ^ mix(prev));
         prev = cur;
     }
 }
@@ -111,7 +109,7 @@ void global_diffuse_inv(MBLOCK *data, m_block seed) {
     m_block prev = k2;
     for (size_t i = 0; i < len; ++i) {
         const m_block cur = data->getBlock(i) ^ mix(prev);
-        data->setBlock(i, cur);
+        (void) data->setBlock(i, cur);
         prev = cur;
     }
 
@@ -119,7 +117,7 @@ void global_diffuse_inv(MBLOCK *data, m_block seed) {
     m_block next = k1;
     for (size_t i = len; i-- > 0;) {
         const m_block cur = data->getBlock(i) ^ mix(next);
-        data->setBlock(i, cur);
+        (void) data->setBlock(i, cur);
         next = cur;
     }
 
@@ -127,7 +125,7 @@ void global_diffuse_inv(MBLOCK *data, m_block seed) {
     prev = k0;
     for (size_t i = 0; i < len; ++i) {
         const m_block cur = data->getBlock(i) ^ mix(prev);
-        data->setBlock(i, cur);
+        (void) data->setBlock(i, cur);
         prev = cur;
     }
 }
@@ -159,8 +157,8 @@ void correlate_data(MBLOCK *data, m_block seed) {
         k = pseudoHadamardT(k);
 
         // Update blocks (order matters!)
-        data->setBlock(nextIdx, k); // Update next block first
-        data->setBlock(i, k ^ nextBlock); // Then update current block
+        (void) data->setBlock(nextIdx, k); // Update next block first
+        (void) data->setBlock(i, k ^ nextBlock); // Then update current block
     }
 }
 
@@ -186,7 +184,7 @@ void uncorrelate_data(MBLOCK *data, m_block seed) {
         k = mBlock::rotr(k, 3) ^ seed;
 
         // Update blocks in reverse order
-        data->setBlock(j, k);
-        data->setBlock(nextIdx, nextBlock ^ currentBlock);
+        (void) data->setBlock(j, k);
+        (void) data->setBlock(nextIdx, nextBlock ^ currentBlock);
     }
 }

@@ -1,6 +1,7 @@
+#include "hashing.h"
+
 #include <cstdio>
 
-#include "hashing.h"
 #include "constants.h"
 #include "oesMath.h"
 #include "raw-layer.h"
@@ -344,7 +345,7 @@ inline void OESHasher::mixIV(m_block *hash, size_t hashLen, MBLOCK **iv) {
 
     for (size_t i = 0; i < ivLen; ++i) {
         const m_block v = ivBlock->getBlock(i) + hash[i % hashLen];
-        ivBlock->setBlock(i, mBlock::rotr(v, 13) ^ hash[(i + 1) % hashLen]);
+        (void) ivBlock->setBlock(i, mBlock::rotr(v, 13) ^ hash[(i + 1) % hashLen]);
     }
 }
 

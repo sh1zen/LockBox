@@ -1,8 +1,8 @@
-#include <cstdlib>
+#include "asymmetric.h"
+
 #include <iostream>
 #include <cstring>
 
-#include "asymmetric.h"
 #include "m_block.h"
 
 /**
@@ -93,7 +93,7 @@ static m_block mod_inverse(m_block a, m_block m) {
  * @param privateKey Output MBLOCK* [n, d] where n is modulus, d is private exponent
  * @return true if successful, false otherwise
  */
-bool oes_generate_keypair(m_block p, m_block q, MBLOCK** publicKey, MBLOCK** privateKey) {
+bool oes_generate_keypair(m_block p, m_block q, MBLOCK **publicKey, MBLOCK **privateKey) {
     if (!publicKey || !privateKey) {
         return false;
     }
@@ -149,7 +149,7 @@ bool oes_generate_keypair(m_block p, m_block q, MBLOCK** publicKey, MBLOCK** pri
  * @param seed Optional seed for additional randomization
  * @return Encrypted/decrypted MBLOCK* (caller must delete)
  */
-MBLOCK* oes_asymmetric(const MBLOCK* data, const MBLOCK* key, m_block seed) {
+MBLOCK *oes_asymmetric(const MBLOCK *data, const MBLOCK *key, m_block seed) {
     // Input validation
     if (!data || data->isNull() || !key || key->isNull() || key->getLen() < 2) {
         return nullptr;
@@ -195,7 +195,7 @@ MBLOCK* oes_asymmetric(const MBLOCK* data, const MBLOCK* key, m_block seed) {
  * @param seed Optional seed value
  * @return Encrypted MBLOCK* (caller must delete)
  */
-MBLOCK* oes_public_encrypt(const MBLOCK* plaintext, const MBLOCK* publicKey, m_block seed) {
+MBLOCK *oes_public_encrypt(const MBLOCK *plaintext, const MBLOCK *publicKey, m_block seed) {
     if (!plaintext || plaintext->isNull() || !publicKey) {
         return nullptr;
     }
@@ -211,7 +211,7 @@ MBLOCK* oes_public_encrypt(const MBLOCK* plaintext, const MBLOCK* publicKey, m_b
  * @param seed Optional seed value (must match encryption seed)
  * @return Decrypted MBLOCK* (caller must delete)
  */
-MBLOCK* oes_private_decrypt(const MBLOCK* ciphertext, const MBLOCK* privateKey, m_block seed) {
+MBLOCK *oes_private_decrypt(const MBLOCK *ciphertext, const MBLOCK *privateKey, m_block seed) {
     if (!ciphertext || ciphertext->isNull() || !privateKey) {
         return nullptr;
     }
@@ -225,7 +225,7 @@ MBLOCK* oes_private_decrypt(const MBLOCK* ciphertext, const MBLOCK* privateKey, 
  * @param privateKey Private key MBLOCK [modulus, private_exponent]
  * @return Signature MBLOCK* (caller must delete)
  */
-MBLOCK* oes_sign(const MBLOCK* data, const MBLOCK* privateKey) {
+MBLOCK *oes_sign(const MBLOCK *data, const MBLOCK *privateKey) {
     if (!data || data->isNull() || !privateKey) {
         return nullptr;
     }
@@ -240,12 +240,12 @@ MBLOCK* oes_sign(const MBLOCK* data, const MBLOCK* privateKey) {
  * @param publicKey Public key MBLOCK [modulus, public_exponent]
  * @return true if signature is valid, false otherwise
  */
-bool oes_verify(const MBLOCK* data, const MBLOCK* signature, const MBLOCK* publicKey) {
+bool oes_verify(const MBLOCK *data, const MBLOCK *signature, const MBLOCK *publicKey) {
     if (!data || data->isNull() || !signature || signature->isNull() || !publicKey) {
         return false;
     }
 
-    MBLOCK* decrypted = oes_asymmetric(signature, publicKey, 0);
+    MBLOCK *decrypted = oes_asymmetric(signature, publicKey, 0);
     if (!decrypted || decrypted->isNull()) {
         delete decrypted;
         return false;
@@ -275,13 +275,13 @@ bool oes_verify(const MBLOCK* data, const MBLOCK* signature, const MBLOCK* publi
  * @param symmetricKey Symmetric key to use (will be encrypted)
  * @return Encrypted MBLOCK* containing [encrypted_key_len, encrypted_key, encrypted_data]
  */
-MBLOCK* oes_hybrid_encrypt(const MBLOCK* plaintext, const MBLOCK* publicKey, const MBLOCK* symmetricKey) {
+MBLOCK *oes_hybrid_encrypt(const MBLOCK *plaintext, const MBLOCK *publicKey, const MBLOCK *symmetricKey) {
     if (!plaintext || plaintext->isNull() || !publicKey || !symmetricKey || symmetricKey->isNull()) {
         return nullptr;
     }
 
     // Encrypt the symmetric key with public key
-    MBLOCK* encryptedKey = oes_asymmetric(symmetricKey, publicKey, 0);
+    MBLOCK *encryptedKey = oes_asymmetric(symmetricKey, publicKey, 0);
     if (!encryptedKey || encryptedKey->isNull()) {
         delete encryptedKey;
         return nullptr;
@@ -320,7 +320,7 @@ MBLOCK* oes_hybrid_encrypt(const MBLOCK* plaintext, const MBLOCK* publicKey, con
  * @param privateKey Private key for asymmetric decryption
  * @return Decrypted MBLOCK*
  */
-MBLOCK* oes_hybrid_decrypt(const MBLOCK* ciphertext, const MBLOCK* privateKey) {
+MBLOCK *oes_hybrid_decrypt(const MBLOCK *ciphertext, const MBLOCK *privateKey) {
     if (!ciphertext || ciphertext->isNull() || !privateKey || ciphertext->getLen() < 2) {
         return nullptr;
     }
@@ -339,7 +339,7 @@ MBLOCK* oes_hybrid_decrypt(const MBLOCK* ciphertext, const MBLOCK* privateKey) {
     MBLOCK encryptedKey(encKeyData, encKeyLen, true);
 
     // Decrypt the symmetric key
-    MBLOCK* decryptedKey = oes_asymmetric(&encryptedKey, privateKey, 0);
+    MBLOCK *decryptedKey = oes_asymmetric(&encryptedKey, privateKey, 0);
     if (!decryptedKey || decryptedKey->isNull()) {
         delete decryptedKey;
         return nullptr;

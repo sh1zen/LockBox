@@ -1,12 +1,11 @@
-#ifndef LOCKBOX_DEFINES_H
-#define LOCKBOX_DEFINES_H
+#pragma once
 
 #ifndef OES_NUM_OF_BLOCKS
-#define OES_NUM_OF_BLOCKS 8
+#define OES_NUM_OF_BLOCKS 16
 #endif
 
 #ifndef OES_LOGIC_BLOCK_SIZE
-#define OES_LOGIC_BLOCK_SIZE 64
+#define OES_LOGIC_BLOCK_SIZE 128
 #endif
 
 #if OES_NUM_OF_BLOCKS % 2 != 0
@@ -57,6 +56,8 @@ typedef signed int int32_t;
 typedef unsigned int uint32_t;
 typedef signed long long int64_t;
 typedef unsigned long long uint64_t;
+
+typedef uint64_t size_t;
 
 
 #define OES_TYPE_RAW_UINT8 0
@@ -113,6 +114,3 @@ consteval auto mask_to_block_size(uint64_t high, const uint64_t low) {
 #elif OES_MEM_SIZE == 128
 #define REPLICATE_BITS(val) REPLICATE_16_128(val)
 #endif
-
-
-#endif //LOCKBOX_DEFINES_H

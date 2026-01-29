@@ -1,9 +1,9 @@
+#include "interface.h"
+
 #include <cstdlib>
 #include <new>
 
-#include <OpenES/layer/raw-layer.h>
 #include <OpenES/support/base64/base64.h>
-#include "interface.h"
 #include "support.h"
 
 // Lookup table for byte -> 2 hex chars (precomputed)

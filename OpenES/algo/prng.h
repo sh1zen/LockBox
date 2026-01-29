@@ -1,8 +1,6 @@
-#ifndef PRNG_H
-#define PRNG_H
+#pragma once
 
 #include "m_block.h"
-#include "defines.h"
 #include "constants.h"
 
 namespace prng {
@@ -144,5 +142,3 @@ namespace prng {
     };
 }
 
-
-#endif // PRNG_H

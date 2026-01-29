@@ -1,7 +1,6 @@
-#ifndef OES_HASHING_H
-#define OES_HASHING_H
+#pragma once
 
-#include "core.h"
+#include "m_block.h"
 
 class OESHasher {
 public:
@@ -64,5 +63,3 @@ private:
     void finalize(m_block* hash, size_t hashLen);
     void mixIV(m_block* hash, size_t hashLen, MBLOCK** iv);
 };
-
-#endif // OES_HASHING_H

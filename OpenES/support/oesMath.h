@@ -1,5 +1,4 @@
-#ifndef LOCKBOX_OESMATH_H
-#define LOCKBOX_OESMATH_H
+#pragma once
 
 #include "m_block.h"
 
@@ -20,5 +19,3 @@ m_block xtime(m_block x);
 size_t next_pow2(size_t x);
 
 size_t ceil_log2(size_t x);
-
-#endif //LOCKBOX_OESMATH_H

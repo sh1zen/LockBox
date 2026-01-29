@@ -1,16 +1,14 @@
 #include "inode_raw.h"
-#include "mman.h"
 
+#include <algorithm>
 #include <fcntl.h>
 #include <cstring>
-#include <algorithm>
+#include <queue>
+#include <set>
 #include <sys/stat.h>
 
 #ifdef _WIN32
-#include <io.h>
-#define O_RDWR  _O_RDWR
-#define O_CREAT _O_CREAT
-#define O_TRUNC _O_TRUNC
+#include "mman.h"
 
 static int p_open(const char *p, int f, int m = 0) {
     return ::_open(p, f, m);
@@ -33,6 +31,9 @@ static int p_ftrunc(int fd, int64_t sz) {
 }
 #else
 #include <unistd.h>
+#include <sys/mman.h>
+#include "mman.h"
+
 static int p_open(const char *p, int f, int m = 0) {
     return ::open(p, f, m);
 }
@@ -53,19 +54,31 @@ static int p_ftrunc(int fd, off_t sz) {
 // ==================== Lifecycle ====================
 
 inode_raw::inode_raw()
-    : fd_(-1), mappedPtr_(nullptr), mappedSize_(0),
-      fileSize_(0), allocSize_(0), dirty_(false) {
+    : fd_(-1)
+      , mappedPtr_(nullptr)
+      , mappedSize_(0)
+      , fileSize_(0)
+      , allocSize_(0)
+      , dirty_(false) {
 }
 
-inode_raw::~inode_raw() { close(); }
+inode_raw::~inode_raw() {
+    close();
+}
 
 inode_raw::inode_raw(inode_raw &&o) noexcept
-    : fd_(o.fd_), path_(std::move(o.path_)), freeList_(std::move(o.freeList_)),
-      mappedPtr_(o.mappedPtr_), mappedSize_(o.mappedSize_),
-      fileSize_(o.fileSize_), allocSize_(o.allocSize_), dirty_(o.dirty_) {
+    : fd_(o.fd_)
+      , path_(std::move(o.path_))
+      , mappedPtr_(o.mappedPtr_)
+      , mappedSize_(o.mappedSize_)
+      , fileSize_(o.fileSize_)
+      , allocSize_(o.allocSize_)
+      , dirty_(o.dirty_) {
     o.fd_ = -1;
     o.mappedPtr_ = nullptr;
-    o.mappedSize_ = o.fileSize_ = o.allocSize_ = 0;
+    o.mappedSize_ = 0;
+    o.fileSize_ = 0;
+    o.allocSize_ = 0;
     o.dirty_ = false;
 }
 
@@ -74,15 +87,17 @@ inode_raw &inode_raw::operator=(inode_raw &&o) noexcept {
         close();
         fd_ = o.fd_;
         path_ = std::move(o.path_);
-        freeList_ = std::move(o.freeList_);
         mappedPtr_ = o.mappedPtr_;
         mappedSize_ = o.mappedSize_;
         fileSize_ = o.fileSize_;
         allocSize_ = o.allocSize_;
         dirty_ = o.dirty_;
+
         o.fd_ = -1;
         o.mappedPtr_ = nullptr;
-        o.mappedSize_ = o.fileSize_ = o.allocSize_ = 0;
+        o.mappedSize_ = 0;
+        o.fileSize_ = 0;
+        o.allocSize_ = 0;
         o.dirty_ = false;
     }
     return *this;
@@ -100,8 +115,9 @@ size_t inode_raw::diskSize() const {
 
 void inode_raw::unmapFile() {
     if (mappedPtr_) {
-        if (dirty_ && fileSize_ > 0)
+        if (dirty_ && fileSize_ > 0) {
             mman::sync(mappedPtr_, fileSize_);
+        }
         mman::unmap(mappedPtr_, mappedSize_);
         mappedPtr_ = nullptr;
         mappedSize_ = 0;
@@ -109,34 +125,9 @@ void inode_raw::unmapFile() {
     }
 }
 
-bool inode_raw::shrinkFile(size_t newSize) {
-    if (fd_ < 0 || newSize >= fileSize_) return false;
-
-    size_t alignedSize = alignUp(newSize, PAGE_SIZE);
-
-    unmapFile();
-
-    if (p_ftrunc(fd_, static_cast<int64_t>(alignedSize)) != 0)
-        return false;
-
-    // Remap with new size
-    auto res = mman::map(nullptr, alignedSize,
-                         mman::Prot::Read | mman::Prot::Write,
-                         mman::MapFlags::Shared, fd_, 0);
-    if (!res.ok()) return false;
-
-    mappedPtr_ = res.ptr;
-    mappedSize_ = alignedSize;
-    allocSize_ = alignedSize;
-    fileSize_ = newSize;
-    return true;
-}
-
-// Pattern: lseek + write(1 byte) per estendere, poi mmap
-bool inode_raw::extendFile(size_t newAllocSize) {
+bool inode_raw::extendFile(size_t newAllocSize) const {
     if (fd_ < 0 || newAllocSize == 0) return false;
 
-    // Seek to last byte position and write 1 byte
     if (p_lseek(fd_, static_cast<int64_t>(newAllocSize - 1), SEEK_SET) == -1)
         return false;
     if (p_write(fd_, "", 1) != 1)
@@ -147,19 +138,18 @@ bool inode_raw::extendFile(size_t newAllocSize) {
 
 bool inode_raw::remapFile(size_t newAllocSize) {
     if (fd_ < 0) return false;
-    if (mappedPtr_ && allocSize_ >= newAllocSize) return true;
 
-    // Align to page size
+    if (mappedPtr_ && allocSize_ >= newAllocSize)
+        return true;
+
     size_t targetAlloc = alignUp(newAllocSize, PAGE_SIZE);
+    if (targetAlloc == 0) targetAlloc = PAGE_SIZE;
 
-    // Unmap existing
     unmapFile();
 
-    // Extend file on disk using lseek+write pattern
     if (!extendFile(targetAlloc))
         return false;
 
-    // Map the file
     auto res = mman::map(nullptr, targetAlloc,
                          mman::Prot::Read | mman::Prot::Write,
                          mman::MapFlags::Shared, fd_, 0);
@@ -168,6 +158,41 @@ bool inode_raw::remapFile(size_t newAllocSize) {
     mappedPtr_ = res.ptr;
     mappedSize_ = targetAlloc;
     allocSize_ = targetAlloc;
+    return true;
+}
+
+bool inode_raw::truncateToSize(size_t newSize) {
+    if (fd_ < 0) return false;
+
+    size_t alignedSize = alignUp(newSize, PAGE_SIZE);
+    if (alignedSize == 0) alignedSize = PAGE_SIZE;
+
+    if (alignedSize == allocSize_)
+        return true;
+
+    if (alignedSize > allocSize_)
+        return remapFile(alignedSize);
+
+    unmapFile();
+
+    if (p_ftrunc(fd_, static_cast<int64_t>(alignedSize)) != 0) {
+        remapFile(allocSize_);
+        return false;
+    }
+
+    auto res = mman::map(nullptr, alignedSize,
+                         mman::Prot::Read | mman::Prot::Write,
+                         mman::MapFlags::Shared, fd_, 0);
+    if (!res.ok()) {
+        mappedPtr_ = nullptr;
+        mappedSize_ = 0;
+        allocSize_ = 0;
+        return false;
+    }
+
+    mappedPtr_ = res.ptr;
+    mappedSize_ = alignedSize;
+    allocSize_ = alignedSize;
     return true;
 }
 
@@ -192,6 +217,7 @@ bool inode_raw::open(const std::string &path) {
         close();
         return false;
     }
+
     return true;
 }
 
@@ -213,6 +239,7 @@ bool inode_raw::create(const std::string &path) {
         close();
         return false;
     }
+
     return true;
 }
 
@@ -221,32 +248,16 @@ void inode_raw::close() {
     unmapFile();
 
     if (fd_ >= 0) {
-        // Truncate to actual logical size
-        if (fileSize_ > 0)
-            p_ftrunc(fd_, static_cast<int64_t>(fileSize_));
+        if (fileSize_ > 0) {
+            p_ftrunc(fd_, static_cast<int64_t>(alignUp(fileSize_, PAGE_SIZE)));
+        }
         p_close(fd_);
         fd_ = -1;
     }
 
     path_.clear();
-    freeList_.clear();
-    fileSize_ = allocSize_ = 0;
-}
-
-// ==================== Size Management ====================
-
-bool inode_raw::reserve(size_t capacity) {
-    if (capacity <= allocSize_) return true;
-    return remapFile(capacity);
-}
-
-bool inode_raw::resize(size_t newSize) {
-    if (newSize > allocSize_) {
-        if (!remapFile(newSize)) return false;
-    }
-    fileSize_ = newSize;
-    dirty_ = true;
-    return true;
+    fileSize_ = 0;
+    allocSize_ = 0;
 }
 
 // ==================== Allocation ====================
@@ -254,243 +265,320 @@ bool inode_raw::resize(size_t newSize) {
 size_t inode_raw::allocate(size_t size) {
     if (size == 0) return NPOS;
 
-    size = alignUp(size, PAGE_SIZE);
-
-    // Try free list (best-fit)
-    if (size_t pos = findFree(size); pos != NPOS)
-        return pos;
-
-    // Allocate from end
+    size_t alignedSize = alignUp(size, PAGE_SIZE);
     size_t pos = fileSize_;
-    size_t newSize = pos + size;
+    size_t newFileSize = pos + alignedSize;
 
-    if (newSize > allocSize_) {
-        if (!remapFile(newSize)) return NPOS;
+    if (newFileSize > allocSize_) {
+        if (!remapFile(newFileSize))
+            return NPOS;
     }
 
-    fileSize_ = newSize;
+    fileSize_ = newFileSize;
+    dirty_ = true;
     return pos;
 }
 
-void inode_raw::free(size_t pos, size_t size) {
-    if (size == 0) return;
+size_t inode_raw::reallocate(size_t oldPos, size_t oldSize, size_t newSize) {
+    if (oldPos == NPOS)
+        return allocate(newSize);
 
-    // Se liberiamo alla fine del file, shrink immediato
-    if (pos + size >= fileSize_) {
-        fileSize_ = pos;
-        // Rimuovi eventuali blocchi liberi che ora sono oltre fileSize_
-        while (!freeList_.empty() && freeList_.back().first >= fileSize_) {
-            freeList_.pop_back();
-        }
-        // Tronca l'ultimo blocco se si sovrappone
-        if (!freeList_.empty()) {
-            auto &last = freeList_.back();
-            if (last.first + last.second > fileSize_) {
-                last.second = fileSize_ - last.first;
-                if (last.second == 0) freeList_.pop_back();
-            }
-        }
-        return;
-    }
-
-    auto it = std::lower_bound(freeList_.begin(), freeList_.end(), pos,
-                               [](const auto &p, size_t v) { return p.first < v; });
-
-    freeList_.insert(it, {pos, size});
-    mergeFree();
-}
-
-std::vector<std::pair<size_t, size_t> >::iterator
-inode_raw::findAdjacentFree(size_t pos, size_t size) {
-    size_t endPos = pos + size;
-
-    for (auto it = freeList_.begin(); it != freeList_.end(); ++it) {
-        if (it->first == endPos) return it; // blocco libero subito dopo
-        if (it->first > endPos) break; // sorted, non troveremo più
-    }
-    return freeList_.end();
-}
-
-bool inode_raw::tryExpand(size_t pos, size_t currentSize, size_t newSize) {
-    if (newSize <= currentSize) return true; // già abbastanza grande
-
-    size_t needed = newSize - currentSize;
-    size_t endPos = pos + currentSize;
-
-    // Caso 1: siamo alla fine del file, espandi direttamente
-    if (endPos == fileSize_) {
-        size_t newFileSize = pos + newSize;
-        if (newFileSize > allocSize_) {
-            if (!remapFile(newFileSize)) return false;
-        }
-        fileSize_ = newFileSize;
-        return true;
-    }
-
-    // Caso 2: c'è un blocco libero adiacente abbastanza grande
-    auto adj = findAdjacentFree(pos, currentSize);
-    if (adj != freeList_.end() && adj->second >= needed) {
-        if (adj->second == needed) {
-            freeList_.erase(adj);
-        } else {
-            adj->first += needed;
-            adj->second -= needed;
-        }
-        return true;
-    }
-
-    return false;
-}
-
-size_t inode_raw::reallocate(size_t pos, size_t oldSize, size_t newSize) {
-    if (pos == NPOS) return allocate(newSize);
-    if (newSize == 0) {
-        free(pos, oldSize);
+    if (newSize == 0)
         return NPOS;
+
+    size_t oldAligned = alignUp(oldSize, PAGE_SIZE);
+    size_t newAligned = alignUp(newSize, PAGE_SIZE);
+
+    if (newAligned == oldAligned)
+        return oldPos;
+
+    if (oldPos + oldAligned == fileSize_) {
+        if (newAligned > oldAligned) {
+            const size_t newFileSize = oldPos + newAligned;
+            if (newFileSize > allocSize_) {
+                if (!remapFile(newFileSize))
+                    return NPOS;
+            }
+            fileSize_ = newFileSize;
+        } else {
+            fileSize_ = oldPos + newAligned;
+        }
+        dirty_ = true;
+        return oldPos;
     }
 
-    oldSize = alignUp(oldSize, PAGE_SIZE);
-    newSize = alignUp(newSize, PAGE_SIZE);
-
-    if (newSize == oldSize) return pos;
-
-    // Caso: nuovo più piccolo → libera la differenza
-    if (newSize < oldSize) {
-        free(pos + newSize, oldSize - newSize);
-        return pos;
-    }
-
-    // Caso: nuovo più grande → prova espansione in-place
-    if (tryExpand(pos, oldSize, newSize)) {
-        return pos;
-    }
-
-    // Caso: devo riallocare altrove
-    size_t newPos = allocate(newSize);
+    const size_t newPos = allocate(newSize);
     if (newPos == NPOS) return NPOS;
 
-    // Copia dati
-    if (mappedPtr_) {
-        std::memmove(static_cast<char *>(mappedPtr_) + newPos,
-                     static_cast<char *>(mappedPtr_) + pos,
-                     oldSize);
+    if (const size_t copySize = std::min(oldSize, newSize); mappedPtr_ && copySize > 0) {
+        std::memcpy(static_cast<char *>(mappedPtr_) + newPos,
+                    static_cast<char *>(mappedPtr_) + oldPos,
+                    copySize);
     }
 
-    // Libera vecchia posizione
-    free(pos, oldSize);
     dirty_ = true;
-
     return newPos;
 }
 
-size_t inode_raw::getFreeSpace() const noexcept {
-    size_t total = 0;
-    for (const auto &[p, s]: freeList_) total += s;
-    return total;
-}
+// ==================== Defragmentation ====================
 
-size_t inode_raw::findFree(size_t size) {
-    if (freeList_.empty()) return NPOS;
+bool inode_raw::defragment() {
+    if (fd_ < 0 || !mappedPtr_ || fileSize_ < sizeof(Block))
+        return false;
 
-    auto best = freeList_.end();
-    size_t bestSz = SIZE_MAX;
+    // ===== Step 1: BFS dalla root per trovare blocchi raggiungibili =====
+    std::vector<size_t> validBlockOffsets;
+    std::set<size_t> visited;
+    std::queue<size_t> toVisit;
 
-    for (auto it = freeList_.begin(); it != freeList_.end(); ++it) {
-        if (it->second >= size && it->second < bestSz) {
-            best = it;
-            bestSz = it->second;
-            if (bestSz == size) break; // exact fit
+    auto enqueue = [&](size_t p) {
+        if (p != 0 && p != NPOS &&
+            p + sizeof(Block) <= fileSize_ &&
+            !visited.contains(p)) {
+            toVisit.push(p);
+        }
+    };
+
+    // Root (posizione 0) è sempre inclusa
+    const auto *root = static_cast<const Block *>(ptr(0));
+    if (!root) return false;
+
+    visited.insert(0);
+    validBlockOffsets.push_back(0);
+
+    // Accoda i collegamenti dalla root
+    enqueue(root->next);
+    enqueue(root->previous);
+    enqueue(root->subdir_pos);
+    // Per le directory, data_pos punta al primo file
+    if (!root->isFile) {
+        enqueue(root->data_pos);
+    }
+
+    // BFS
+    while (!toVisit.empty()) {
+        size_t pos = toVisit.front();
+        toVisit.pop();
+
+        if (visited.contains(pos))
+            continue;
+
+        const auto *blk = static_cast<const Block *>(ptr(pos));
+        if (!blk)
+            continue;
+
+        visited.insert(pos);
+        validBlockOffsets.push_back(pos);
+
+        enqueue(blk->next);
+        enqueue(blk->previous);
+        enqueue(blk->parent);
+        enqueue(blk->subdir_pos);
+
+        // Per le directory, data_pos punta al primo file
+        if (!blk->isFile) {
+            enqueue(blk->data_pos);
         }
     }
 
-    if (best == freeList_.end()) return NPOS;
+    // Ordina per offset
+    std::ranges::sort(validBlockOffsets.begin(), validBlockOffsets.end());
 
-    size_t pos = best->first;
-    if (best->second > size) {
-        best->first += size;
-        best->second -= size;
-    } else {
-        freeList_.erase(best);
-    }
-    return pos;
-}
+    // ===== Step 2: Raccogli blocchi, dati file, nomi esterni =====
+    struct BlockEntry {
+        size_t oldPos{};
+        Block block;
+    };
 
-void inode_raw::mergeFree() {
-    if (freeList_.size() < 2) return;
+    struct DataEntry {
+        size_t oldPos{};
+        size_t size{};
+        size_t alignedSize{};
+        std::vector<uint8_t> data;
+    };
 
-    auto it = freeList_.begin();
-    while (it != freeList_.end() && std::next(it) != freeList_.end()) {
-        auto nx = std::next(it);
-        if (it->first + it->second >= nx->first) {
-            size_t end = std::max(it->first + it->second, nx->first + nx->second);
-            it->second = end - it->first;
-            freeList_.erase(nx);
-        } else {
-            ++it;
+    std::vector<BlockEntry> blocks;
+    std::vector<DataEntry> fileDataEntries;
+    std::vector<DataEntry> nameEntries;
+
+    std::set<size_t> collectedData;
+    std::set<size_t> collectedNames;
+
+    blocks.reserve(validBlockOffsets.size());
+
+    for (size_t oldPos: validBlockOffsets) {
+        BlockEntry entry;
+        entry.oldPos = oldPos;
+        std::memcpy(&entry.block, ptr(oldPos), sizeof(Block));
+        blocks.push_back(entry);
+
+        const Block &blk = entry.block;
+
+        // Raccogli dati file (SOLO per file, non directory!)
+        // Per le directory, data_pos punta al primo file (già gestito nella BFS)
+        if (blk.isFile && blk.data_pos != 0 && blk.data_pos != NPOS &&
+            blk.size > 0 &&
+            blk.data_pos + blk.size <= fileSize_ &&
+            !collectedData.contains(blk.data_pos)) {
+            collectedData.insert(blk.data_pos);
+
+            DataEntry de;
+            de.oldPos = blk.data_pos;
+            de.size = blk.size;
+            de.alignedSize = alignUp(blk.size, PAGE_SIZE);
+            de.data.resize(de.alignedSize, 0);
+            std::memcpy(de.data.data(), ptr(blk.data_pos), blk.size);
+            fileDataEntries.push_back(std::move(de));
+        }
+
+        // Raccogli nomi esterni
+        if (blk.name_offset != 0 && blk.name_offset != NPOS &&
+            blk.name_len > 0 &&
+            blk.name_offset + blk.name_len <= fileSize_ &&
+            !collectedNames.contains(blk.name_offset)) {
+            collectedNames.insert(blk.name_offset);
+
+            DataEntry ne;
+            ne.oldPos = blk.name_offset;
+            ne.size = blk.name_len;
+            ne.alignedSize = alignUp(blk.name_len, 16);
+            ne.data.resize(ne.alignedSize, 0);
+            std::memcpy(ne.data.data(), ptr(blk.name_offset), blk.name_len);
+            nameEntries.push_back(std::move(ne));
         }
     }
-}
 
-void inode_raw::defragmentFreeList() {
-    if (freeList_.empty()) return;
+    // ===== Step 3: Calcola nuovo layout =====
+    // Layout: [Blocchi][Padding][Dati][Padding][Nomi]
 
-    // Sort by offset
-    std::sort(freeList_.begin(), freeList_.end(),
-              [](const auto &a, const auto &b) { return a.first < b.first; });
+    std::unordered_map<size_t, size_t> blockReloc;
+    std::unordered_map<size_t, size_t> dataReloc;
+    std::unordered_map<size_t, size_t> nameReloc;
 
-    // Merge adjacent blocks
-    std::vector<std::pair<size_t, size_t> > merged;
-    merged.reserve(freeList_.size());
-    merged.push_back(freeList_[0]);
+    size_t cursor = 0;
 
-    for (size_t i = 1; i < freeList_.size(); ++i) {
-        auto &last = merged.back();
-        const auto &curr = freeList_[i];
-        if (last.first + last.second >= curr.first) {
-            size_t end = std::max(last.first + last.second, curr.first + curr.second);
-            last.second = end - last.first;
-        } else {
-            merged.push_back(curr);
+    // Blocchi
+    for (const auto &[oldPos, block]: blocks) {
+        blockReloc[oldPos] = cursor;
+        cursor += sizeof(Block);
+    }
+    cursor = alignUp(cursor, PAGE_SIZE);
+
+    // Dati file
+    for (const auto &entry: fileDataEntries) {
+        dataReloc[entry.oldPos] = cursor;
+        cursor += entry.alignedSize;
+    }
+
+    // Nomi esterni
+    if (!nameEntries.empty()) {
+        cursor = alignUp(cursor, PAGE_SIZE);
+        for (const auto &entry: nameEntries) {
+            nameReloc[entry.oldPos] = cursor;
+            cursor += entry.alignedSize;
         }
     }
 
-    freeList_ = std::move(merged);
+    size_t newFileSize = alignUp(cursor, PAGE_SIZE);
+    if (newFileSize == 0) newFileSize = PAGE_SIZE;
 
-    // Shrink: rimuovi tutto lo spazio libero alla fine del file
-    while (!freeList_.empty()) {
-        auto &last = freeList_.back();
-        if (last.first + last.second >= fileSize_) {
-            // Questo blocco libero è alla fine, riduci fileSize_
-            fileSize_ = last.first;
-            freeList_.pop_back();
-        } else {
-            break;
+    // ===== Step 4: Aggiorna puntatori nei blocchi =====
+    auto relocBlock = [&](size_t p) -> size_t {
+        if (p == NPOS) return NPOS;
+        auto it = blockReloc.find(p);
+        return (it != blockReloc.end()) ? it->second : 0;
+    };
+
+    auto relocData = [&](size_t p) -> size_t {
+        if (p == 0 || p == NPOS) return p;
+        auto it = dataReloc.find(p);
+        return (it != dataReloc.end()) ? it->second : 0;
+    };
+
+    auto relocName = [&](size_t p) -> size_t {
+        if (p == 0 || p == NPOS) return p;
+        auto it = nameReloc.find(p);
+        return (it != nameReloc.end()) ? it->second : 0;
+    };
+
+    for (auto &[oldPos, block]: blocks) {
+        Block &blk = block;
+
+        // current = nuova posizione di questo blocco
+        blk.current = blockReloc[oldPos];
+
+        // Altri puntatori a blocchi
+        blk.parent = relocBlock(blk.parent);
+        blk.next = relocBlock(blk.next);
+        blk.previous = relocBlock(blk.previous);
+        blk.subdir_pos = relocBlock(blk.subdir_pos);
+
+        // data_pos: per i FILE punta ai dati, per le DIRECTORY punta al primo file (blocco)
+        if (blk.data_pos != 0 && blk.data_pos != NPOS) {
+            if (blk.isFile) {
+                blk.data_pos = relocData(blk.data_pos);
+            } else {
+                blk.data_pos = relocBlock(blk.data_pos);
+            }
+        }
+
+        // Puntatore nome esterno
+        if (blk.name_offset != 0 && blk.name_offset != NPOS) {
+            blk.name_offset = relocName(blk.name_offset);
         }
     }
-}
 
-void inode_raw::compact() {
-    defragmentFreeList();
+    // ===== Step 5: Costruisci immagine compattata =====
+    std::vector<uint8_t> newImage(newFileSize, 0);
 
-    if (fileSize_ == 0) return;
-
-    // Shrink file fisico se allocSize_ >> fileSize_
-    size_t alignedSize = alignUp(fileSize_, PAGE_SIZE);
-    if (allocSize_ > alignedSize) {
-        shrinkFile(fileSize_);
+    // Scrivi blocchi
+    for (const auto &[oldPos, block]: blocks) {
+        size_t newPos = blockReloc[oldPos];
+        std::memcpy(newImage.data() + newPos, &block, sizeof(Block));
     }
+
+    // Scrivi dati file
+    for (const auto &entry: fileDataEntries) {
+        size_t newPos = dataReloc[entry.oldPos];
+        std::memcpy(newImage.data() + newPos, entry.data.data(), entry.alignedSize);
+    }
+
+    // Scrivi nomi esterni
+    for (const auto &entry: nameEntries) {
+        size_t newPos = nameReloc[entry.oldPos];
+        std::memcpy(newImage.data() + newPos, entry.data.data(), entry.alignedSize);
+    }
+
+    // ===== Step 6: Scrivi sul file =====
+    if (newFileSize > allocSize_) {
+        if (!remapFile(newFileSize))
+            return false;
+    }
+
+    std::memcpy(mappedPtr_, newImage.data(), newFileSize);
+
+    // ===== Step 7: Finalizza =====
+    fileSize_ = newFileSize;
+    dirty_ = true;
+    sync();
+
+    return truncateToSize(newFileSize);
 }
 
 // ==================== Raw I/O ====================
 
 bool inode_raw::write(size_t pos, const void *data, size_t size) {
-    if (fd_ < 0 || !data || size == 0) return false;
+    if (fd_ < 0 || !data || size == 0)
+        return false;
 
     size_t needed = pos + size;
     if (needed > allocSize_) {
-        if (!remapFile(needed)) return false;
+        if (!remapFile(needed))
+            return false;
     }
-    if (needed > fileSize_) fileSize_ = needed;
+
+    if (needed > fileSize_)
+        fileSize_ = needed;
 
     std::memcpy(static_cast<char *>(mappedPtr_) + pos, data, size);
     dirty_ = true;
@@ -498,21 +586,26 @@ bool inode_raw::write(size_t pos, const void *data, size_t size) {
 }
 
 bool inode_raw::read(size_t pos, void *data, size_t size) const {
-    if (fd_ < 0 || !data || size == 0) return false;
-    if (pos + size > fileSize_) return false;
-    if (!mappedPtr_) return false;
+    if (fd_ < 0 || !data || size == 0)
+        return false;
+    if (pos + size > fileSize_)
+        return false;
+    if (!mappedPtr_)
+        return false;
 
     std::memcpy(data, static_cast<const char *>(mappedPtr_) + pos, size);
     return true;
 }
 
 void *inode_raw::ptr(size_t pos) noexcept {
-    if (!mappedPtr_ || pos >= allocSize_) return nullptr;
+    if (!mappedPtr_ || pos >= allocSize_)
+        return nullptr;
     return static_cast<char *>(mappedPtr_) + pos;
 }
 
 const void *inode_raw::ptr(size_t pos) const noexcept {
-    if (!mappedPtr_ || pos >= allocSize_) return nullptr;
+    if (!mappedPtr_ || pos >= allocSize_)
+        return nullptr;
     return static_cast<const char *>(mappedPtr_) + pos;
 }
 
@@ -528,9 +621,13 @@ bool inode_raw::writeBlock(size_t pos, const Block *block) {
 
 size_t inode_raw::appendBlock(const Block *block) {
     if (!block) return NPOS;
+
     size_t pos = allocate(sizeof(Block));
     if (pos == NPOS) return NPOS;
-    if (!write(pos, block, sizeof(Block))) return NPOS;
+
+    if (!write(pos, block, sizeof(Block)))
+        return NPOS;
+
     return pos;
 }
 

@@ -1,8 +1,9 @@
 #pragma once
 
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
-#include <functional>
 
 class OES;
 
@@ -96,15 +97,15 @@ public:
 
     void setAccessedNow() noexcept;
 
-    uint64_t getCreatedAt() const noexcept { return created_at; }
-    uint64_t getModifiedAt() const noexcept { return modified_at; }
-    uint64_t getAccessedAt() const noexcept { return accessed_at; }
+    [[nodiscard]] size_t getCreatedAt() const noexcept { return created_at; }
+    [[nodiscard]] size_t getModifiedAt() const noexcept { return modified_at; }
+    [[nodiscard]] size_t getAccessedAt() const noexcept { return accessed_at; }
 
-    std::string getCreatedAtStr() const;
+    [[nodiscard]] std::string getCreatedAtStr() const;
 
-    std::string getModifiedAtStr() const;
+    [[nodiscard]] std::string getModifiedAtStr() const;
 
-    std::string getAccessedAtStr() const;
+    [[nodiscard]] std::string getAccessedAtStr() const;
 
     // ====================== Core Methods ======================
     void reset() noexcept;

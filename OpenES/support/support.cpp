@@ -1,8 +1,6 @@
-#include <cstdlib>
-
 #include "support.h"
 
-#include <cstring>
+#include <cstdlib>
 
 void mem_transfer(void **dst, void *src) {
     if (*dst == nullptr) {

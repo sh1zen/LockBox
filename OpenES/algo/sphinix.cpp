@@ -221,9 +221,9 @@ namespace SPHINX {
      * More blocks require more mixing for key derivation
      */
     constexpr size_t SCHEDULER_PERMUTE_ROUNDS = []() constexpr -> size_t {
-        if constexpr (OES_NUM_OF_BLOCKS >= 16) return 12;
-        if constexpr (OES_NUM_OF_BLOCKS >= 8) return 10;
-        return 8;
+        if constexpr (OES_NUM_OF_BLOCKS >= 16) return 20;
+        if constexpr (OES_NUM_OF_BLOCKS >= 8) return 16;
+        return 12;
     }();
 
     /**
@@ -231,9 +231,9 @@ namespace SPHINX {
      * More blocks = more rounds for complete cross-block mixing
      */
     constexpr size_t WIDE_SBOX_ROUNDS = []() constexpr -> size_t {
-        if constexpr (OES_NUM_OF_BLOCKS >= 8) return 4;
-        if constexpr (OES_NUM_OF_BLOCKS >= 4) return 3;
-        if constexpr (OES_NUM_OF_BLOCKS >= 2) return 2;
+        if constexpr (OES_NUM_OF_BLOCKS >= 8) return 8;
+        if constexpr (OES_NUM_OF_BLOCKS >= 4) return 6;
+        if constexpr (OES_NUM_OF_BLOCKS >= 2) return 4;
         return 2;
     }();
 

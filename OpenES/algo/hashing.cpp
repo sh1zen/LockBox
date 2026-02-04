@@ -1,6 +1,8 @@
 #include "hashing.h"
 
 #include <cstdio>
+#include <cstring>
+#include <iostream>
 
 #include "constants.h"
 #include "oesMath.h"
@@ -71,6 +73,7 @@ alignas(64) constexpr m_block OESHasher::ROUND_CONSTANTS[32] = {
 constexpr size_t SMIX_S1 = (OES_MEM_SIZE * 30) / 64 + 1;
 constexpr size_t SMIX_S2 = (OES_MEM_SIZE * 27) / 64 + 1;
 constexpr size_t SMIX_S3 = (OES_MEM_SIZE * 31) / 64 + 1;
+constexpr size_t ROT_MASK = OES_MEM_SIZE - 1;
 
 
 // ============================================================================
@@ -98,17 +101,19 @@ m_block OESHasher::smix(m_block x) {
 // ============================================================================
 
 void OESHasher::initHashConstants() {
+    static const m_block *kHashConstants = []() -> const m_block * {
+        alignas(64) static m_block table[STATE_SIZE];
 #pragma unroll
-    for (size_t i = 0; i < STATE_SIZE; ++i) {
-        m_hashConstants[i] = smix(i * INIT_MUL);
-    }
+        for (size_t i = 0; i < STATE_SIZE; ++i) {
+            table[i] = smix(i * INIT_MUL);
+        }
+        return table;
+    }();
+    m_hashConstants = kHashConstants;
 }
 
 void OESHasher::resetState() {
-#pragma unroll
-    for (m_block &i: m_state) {
-        i = static_cast<m_block>(0);
-    }
+    std::memset(m_state, 0, sizeof(m_state));
     resetCarry();
     m_domainCount = 0; // <-- Aggiungi questo reset
 }
@@ -118,10 +123,7 @@ void OESHasher::resetState() {
 // ============================================================================
 
 void OESHasher::resetCarry() {
-#pragma unroll
-    for (m_block &i: m_carry) {
-        i = static_cast<m_block>(0);
-    }
+    std::memset(m_carry, 0, sizeof(m_carry));
 }
 
 void OESHasher::initCarry(const size_t dataLen, const size_t hashLen, const m_block pad) {
@@ -134,22 +136,49 @@ void OESHasher::initCarry(const size_t dataLen, const size_t hashLen, const m_bl
 }
 
 inline m_block OESHasher::derivePositionalCarry(size_t j) const {
-    constexpr size_t mask = CARRY_SIZE - 1;
-    const size_t idx = j & mask;
+    const size_t idx = j & (CARRY_SIZE - 1);
+    m_block c0;
+    m_block c1;
+    m_block c2;
+    m_block c3;
 
-    const m_block c0 = m_carry[idx];
-    const m_block c1 = m_carry[(idx + 1) & mask];
-    const m_block c2 = m_carry[(idx + 2) & mask];
-    const m_block c3 = m_carry[(idx + 3) & mask];
+    switch (idx) {
+        case 0:
+            c0 = m_carry[0];
+            c1 = m_carry[1];
+            c2 = m_carry[2];
+            c3 = m_carry[3];
+            break;
+        case 1:
+            c0 = m_carry[1];
+            c1 = m_carry[2];
+            c2 = m_carry[3];
+            c3 = m_carry[0];
+            break;
+        case 2:
+            c0 = m_carry[2];
+            c1 = m_carry[3];
+            c2 = m_carry[0];
+            c3 = m_carry[1];
+            break;
+        default:
+            c0 = m_carry[3];
+            c1 = m_carry[0];
+            c2 = m_carry[1];
+            c3 = m_carry[2];
+            break;
+    }
 
-    return (mBlock::rotl(c0, j * 7) ^ mBlock::rotl(c1, j * 11)) + (c2 & c3);
+    const uint32_t rot7 = static_cast<uint32_t>((j * 7) & ROT_MASK);
+    const uint32_t rot11 = static_cast<uint32_t>((j * 11) & ROT_MASK);
+    return (mBlock::rotl(c0, rot7) ^ mBlock::rotl(c1, rot11)) + (c2 & c3);
 }
 
 
 void OESHasher::evolveCarry(const size_t round) {
     const size_t base = (round * 4) & STATE_MASK;
 
-    m_block tmp[CARRY_SIZE];
+    alignas(64) m_block tmp[CARRY_SIZE];
 
     // Ogni carry si evolve con elementi diversi dello stato
     tmp[0] = m_carry[0] + (m_state[base] & m_state[(base + 1) & STATE_MASK]);
@@ -180,38 +209,57 @@ m_block OESHasher::getFinalCarry() const {
 // ============================================================================
 
 void OESHasher::absorbData(const MBLOCK *data, size_t dataLen, m_block pad) {
-    for (size_t i = 0; i < MAX(closestMultiple(dataLen, 4), STATE_SIZE); i += 4) {
-        auto d0 = (i < dataLen ? data->getBlock(i) : pad);
-        auto d1 = (i + 1 < dataLen ? data->getBlock(i + 1) : pad);
-        auto d2 = (i + 2 < dataLen ? data->getBlock(i + 2) : pad);
-        auto d3 = (i + 3 < dataLen ? data->getBlock(i + 3) : pad);
+    const size_t roundedDataLen = (dataLen + 3) & ~static_cast<size_t>(3);
+    const size_t limit = (roundedDataLen > STATE_SIZE) ? roundedDataLen : STATE_SIZE;
+    const size_t fullLen = dataLen & ~static_cast<size_t>(3);
 
-        d0 = mBlock::rotr(d0, d1 & (OES_MEM_SIZE - 1));
-        d1 = mBlock::rotr(d1, d2 & (OES_MEM_SIZE - 1));
-        d2 = mBlock::rotr(d2, d3 & (OES_MEM_SIZE - 1));
-        d3 = mBlock::rotr(d3, (i * 7 + 13) & (OES_MEM_SIZE - 1));
+    auto absorbQuad = [&](const size_t i, m_block d0, m_block d1, m_block d2, m_block d3) {
+        d0 = mBlock::rotr(d0, d1 & ROT_MASK);
+        d1 = mBlock::rotr(d1, d2 & ROT_MASK);
+        d2 = mBlock::rotr(d2, d3 & ROT_MASK);
+        d3 = mBlock::rotr(d3, static_cast<uint32_t>((i * 7 + 13) & ROT_MASK));
 
-        const m_block route = i ^ m_state[(i + 7) & STATE_MASK] ^
+        const m_block route = static_cast<m_block>(i) ^ m_state[(i + 7) & STATE_MASK] ^
                               mBlock::rotl(m_state[(i + 19) & STATE_MASK], 11) ^
                               (d0 | 1) * PHI_CONST;
 
-        const auto r0 = SBOX64[route & STATE_MASK];
-        const auto r1 = SBOX64[(route + 1) & STATE_MASK];
-        const auto r2 = SBOX64[(route + 2) & STATE_MASK];
-        const auto r3 = SBOX64[(route + 3) & STATE_MASK];
+        const size_t routeIdx = static_cast<size_t>(route) & STATE_MASK;
+        const auto r0 = SBOX64[routeIdx];
+        const auto r1 = SBOX64[(routeIdx + 1) & STATE_MASK];
+        const auto r2 = SBOX64[(routeIdx + 2) & STATE_MASK];
+        const auto r3 = SBOX64[(routeIdx + 3) & STATE_MASK];
 
         m_state[r0] += ((m_hashConstants[r1] + d0) ^ (~d1 & d2)) * PHI_CONST;
         m_state[r1] ^= (m_hashConstants[r0] * d1) ^ (~d2 & d3);
         m_state[r2] ^= (m_hashConstants[r3] + d2) ^ (~d3 & d0);
         m_state[r3] += (m_hashConstants[r2] * d3) ^ (~d0 & d1);
+    };
+
+    size_t i = 0;
+    for (; i < fullLen; i += 4) {
+        absorbQuad(i, (*data)[i], (*data)[i + 1], (*data)[i + 2], (*data)[i + 3]);
+    }
+
+    if (i < dataLen) {
+        const m_block d0 = (*data)[i];
+        const m_block d1 = (i + 1 < dataLen) ? (*data)[i + 1] : pad;
+        const m_block d2 = (i + 2 < dataLen) ? (*data)[i + 2] : pad;
+        const m_block d3 = (i + 3 < dataLen) ? (*data)[i + 3] : pad;
+        absorbQuad(i, d0, d1, d2, d3);
+        i += 4;
+    }
+
+    for (; i < limit; i += 4) {
+        absorbQuad(i, pad, pad, pad, pad);
     }
 }
 
 void OESHasher::applyDomainSeparation() {
     ++m_domainCount;
+    const m_block d = smix(m_domainCount);
 
-    m_state[0] ^= 0x1F ^ smix(m_domainCount);
-    m_state[STATE_MASK] ^= 0x80 ^ smix(m_domainCount);
+    m_state[0] ^= 0x1F ^ d;
+    m_state[STATE_MASK] ^= 0x80 ^ d;
 }
 
 // ============================================================================
@@ -276,7 +324,7 @@ inline void OESHasher::chiNonlinear(m_block *s, const m_block *tmp) {
 }
 
 inline void OESHasher::permute(const size_t round) {
-    m_block tmp[STATE_SIZE];
+    alignas(64) m_block tmp[STATE_SIZE];
 
     m_state[0] ^= ROUND_CONSTANTS[round & 31];
 
@@ -316,36 +364,62 @@ inline void OESHasher::finalize(m_block *hash, size_t hashLen) {
     permute(NUM_ROUNDS);
 
     const m_block finalCarry = getFinalCarry();
+    uint32_t rot7 = 0;
+    uint32_t rot11 = 0;
 
     for (size_t i = 0; i < hashLen; ++i) {
         const m_block posCarry = derivePositionalCarry(i);
 
         hash[i] ^= m_state[i & STATE_MASK];
-        hash[i] += mBlock::rotr(posCarry ^ m_state[(i + 32) & STATE_MASK], (i * 7) & (OES_MEM_SIZE - 1));
+        hash[i] += mBlock::rotr(posCarry ^ m_state[(i + 32) & STATE_MASK], rot7);
 
         // Mixing finale extra con carry combinato
-        hash[i] ^= mBlock::rotl(finalCarry, (i * 11) & 63);
+        hash[i] ^= mBlock::rotl(finalCarry, rot11);
+
+        rot7 = (rot7 + 7) & ROT_MASK;
+        rot11 = (rot11 + 11) & 63;
     }
 }
 
 inline void OESHasher::mixIV(m_block *hash, size_t hashLen, MBLOCK **iv) {
-    if (!iv || !*iv || (*iv)->isNull()) return;
+    if (!iv || !*iv || (*iv)->isNull()) {
+        return;
+    }
 
     m_state[0] ^= 0xA4; // DOMAIN_IV
 
     MBLOCK *ivBlock = *iv;
     const size_t ivLen = ivBlock->getLen();
+    m_block *ivData = ivBlock->getDataRef();
 
-    if (ivLen == 0) return;
-
-    for (size_t i = 0; i < hashLen; ++i) {
-        const m_block v = ivBlock->getBlock(i % ivLen);
-        hash[i] ^= mBlock::rotr(v, static_cast<uint32_t>(i & (OES_MEM_SIZE - 1)));
+    if (ivLen == 0) {
+        return;
     }
 
+    size_t ivIdx = 0;
+    for (size_t i = 0; i < hashLen; ++i) {
+        const m_block v = ivData[ivIdx];
+        hash[i] ^= mBlock::rotr(v, static_cast<uint32_t>(i & ROT_MASK));
+        ivIdx++;
+        if (ivIdx == ivLen) {
+            ivIdx = 0;
+        }
+    }
+
+    size_t h0 = 0;
+    size_t h1 = (hashLen > 1) ? 1 : 0;
     for (size_t i = 0; i < ivLen; ++i) {
-        const m_block v = ivBlock->getBlock(i) + hash[i % hashLen];
-        (void) ivBlock->setBlock(i, mBlock::rotr(v, 13) ^ hash[(i + 1) % hashLen]);
+        const m_block v = ivData[i] + hash[h0];
+        ivData[i] = mBlock::rotr(v, 13) ^ hash[h1];
+
+        h0++;
+        if (h0 == hashLen) {
+            h0 = 0;
+        }
+        h1++;
+        if (h1 == hashLen) {
+            h1 = 0;
+        }
     }
 }
 
@@ -353,18 +427,21 @@ inline void OESHasher::mixIV(m_block *hash, size_t hashLen, MBLOCK **iv) {
 // API PUBBLICA
 // ============================================================================
 
-MBLOCK *OESHasher::hash(const MBLOCK *data, size_t hashLen, MBLOCK **iv) {
-    if (!data || data->isNull() || hashLen == 0) return nullptr;
+bool OESHasher::hash_into(const MBLOCK *data, size_t hashLen, m_block *hashOut, MBLOCK **iv) {
+    if (!data || data->isNull() || hashLen == 0) {
+        std::cerr << "[HASHER] Invalid hashing data" << std::endl;
+        return false;
+    }
 
     const size_t dataLen = data->getLen();
-    if (dataLen == 0 || hashLen > MAX_HASH_LEN) {
-        return nullptr;
+    if (!hashOut || dataLen == 0 || hashLen > OES_MEM_SIZE * OES_NUM_OF_BLOCKS) {
+        std::cerr << "[HASHER] Invalid hash len" << std::endl;
+        return false;
     }
 
     // Reset e inizializzazione
     resetState();
-
-    auto *hashOut = new m_block[hashLen](static_cast<m_block>(0));
+    std::memset(hashOut, 0, hashLen * sizeof(m_block));
 
     const m_block pad = MASK_TO_BLOCK_SIZE(0x8000000000000000, 0x0000000000000000) ^
                         static_cast<m_block>(dataLen) ^
@@ -386,6 +463,21 @@ MBLOCK *OESHasher::hash(const MBLOCK *data, size_t hashLen, MBLOCK **iv) {
     finalize(hashOut, hashLen);
     applyDomainSeparation();
     mixIV(hashOut, hashLen, iv);
+
+    return true;
+}
+
+MBLOCK *OESHasher::hash(const MBLOCK *data, size_t hashLen, MBLOCK **iv) {
+    if (hashLen == 0) {
+        std::cerr << "[HASHER] Invalid hash len" << std::endl;
+        return nullptr;
+    }
+
+    auto *hashOut = new m_block[hashLen];
+    if (!hash_into(data, hashLen, hashOut, iv)) {
+        delete[] hashOut;
+        return nullptr;
+    }
 
     return new MBLOCK(hashOut, hashLen, true);
 }

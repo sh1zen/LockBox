@@ -26,9 +26,7 @@ namespace prng {
 
     // Secure clear
     void PRNG::clear() {
-        for (m_block &i: state) {
-            i = 0;
-        }
+        std::memset(state, 0, sizeof(state));
         counter = 0;
         accumulator = 0;
     }
@@ -95,6 +93,7 @@ namespace prng {
     void PRNG::init(const m_block seed) {
         counter = 0;
         accumulator = 0;
+        m_block *st = state;
 
         // seed hash
         m_block h = seed;
@@ -120,35 +119,38 @@ namespace prng {
                 s = s * LCG_MULT + LCG_INC;
 
                 // Aggiornamento state
-                state[i] = apply_sbox(s ^ h);
-                state[i] *= DIFFUSE_CONST;
-                state[i] ^= state[i] >> S1;
+                m_block si = apply_sbox(s ^ h);
+                si *= DIFFUSE_CONST;
+                si ^= si >> S1;
+                st[i] = si;
 
                 // Diffusione cross-state (aumentata per 32/64 bit)
-                state[(i + 1) & 15] ^= mBlock::rotl(state[i], ROT1);
-                state[(i + 7) & 15] ^= mBlock::rotl(state[i], ROT2);
+                const m_block siRot1 = mBlock::rotl(si, ROT1);
+                const m_block siRot2 = mBlock::rotl(si, ROT2);
+                st[(i + 1) & 15] ^= siRot1;
+                st[(i + 7) & 15] ^= siRot2;
 
                 if constexpr (OES_MEM_SIZE >= 32) {
-                    state[(i + 11) & 15] ^= mBlock::rotl(state[i], ROT3);
-                    state[(i + 13) & 15] ^= mBlock::rotl(state[i], ROT4);
+                    st[(i + 11) & 15] ^= mBlock::rotl(si, ROT3);
+                    st[(i + 13) & 15] ^= mBlock::rotl(si, ROT4);
                 }
 
                 // Quarter round ogni 4 elementi
                 if ((i & 3) == 3) {
-                    quarter_round(state[i - 3], state[i - 2], state[i - 1], state[i]);
+                    quarter_round(st[i - 3], st[i - 2], st[i - 1], st[i]);
                 }
             }
 
             // Column mixing per blocchi >= 32 bit (stile ChaCha)
             if constexpr (OES_MEM_SIZE >= 32) {
                 for (int col = 0; col < 4; col++) {
-                    quarter_round(state[col], state[col + 4], state[col + 8], state[col + 12]);
+                    quarter_round(st[col], st[col + 4], st[col + 8], st[col + 12]);
                 }
                 // Diagonal mixing
-                quarter_round(state[0], state[5], state[10], state[15]);
-                quarter_round(state[1], state[6], state[11], state[12]);
-                quarter_round(state[2], state[7], state[8], state[13]);
-                quarter_round(state[3], state[4], state[9], state[14]);
+                quarter_round(st[0], st[5], st[10], st[15]);
+                quarter_round(st[1], st[6], st[11], st[12]);
+                quarter_round(st[2], st[7], st[8], st[13]);
+                quarter_round(st[3], st[4], st[9], st[14]);
             }
         }
     }
@@ -156,10 +158,12 @@ namespace prng {
     m_block PRNG::next() {
         m_block ctr = (counter++) * PRNG_MULT1;
         ctr ^= ctr >> OES_HALF_MEM_SIZE;
+        const size_t ctrIdx = static_cast<size_t>(ctr) & 15;
+        m_block *st = state;
 
         // Inizializzazione da counter e state
-        m_block L = state[ctr & 15] ^ ctr ^ accumulator;
-        m_block R = state[ctr + 7 & 15] ^ (LCG_MULT * ctr + LCG_INC);
+        m_block L = st[ctrIdx] ^ ctr ^ accumulator;
+        m_block R = st[(ctrIdx + 7) & 15] ^ (LCG_MULT * ctr + LCG_INC);
         //R ^= R >> S1;
 
         // Costanti ottimizzate per dimensione
@@ -167,11 +171,20 @@ namespace prng {
 
 #pragma unroll
         for (int r = 0; r < ROUNDS; r++) {
-#pragma unroll
-            for (int s = 0; s < 4; s++) {
-                L ^= mBlock::rotl(state[ctr + r + s & 15], ROT1 + s);
-                R ^= mBlock::rotl(state[r + s + 2 & 15], ctr + s);
-            }
+            const size_t b0 = (ctrIdx + static_cast<size_t>(r)) & 15;
+            const size_t b1 = (static_cast<size_t>(r) + 2) & 15;
+
+            L ^= mBlock::rotl(st[b0], ROT1);
+            R ^= mBlock::rotl(st[b1], ctr);
+
+            L ^= mBlock::rotl(st[(b0 + 1) & 15], ROT1 + 1);
+            R ^= mBlock::rotl(st[(b1 + 1) & 15], ctr + 1);
+
+            L ^= mBlock::rotl(st[(b0 + 2) & 15], ROT1 + 2);
+            R ^= mBlock::rotl(st[(b1 + 2) & 15], ctr + 2);
+
+            L ^= mBlock::rotl(st[(b0 + 3) & 15], ROT1 + 3);
+            R ^= mBlock::rotl(st[(b1 + 3) & 15], ctr + 3);
 
             // Mixing moltiplicativo
             L *= PRNG_MULT1;
@@ -189,7 +202,7 @@ namespace prng {
 
             // Iniezione addizionale ogni 4 round
             if ((r & 3) == 3) {
-                L ^= state[(ctr + r) & 15];
+                L ^= st[(ctrIdx + static_cast<size_t>(r)) & 15];
                 R *= PRNG_MULT2;
                 R ^= R >> S2;
             }
@@ -210,7 +223,7 @@ namespace prng {
 
         // State update meno frequente
         if ((ctr & 3) == 0) {
-            state[(ctr >> 2) & 15] ^= accumulator;
+            st[(ctr >> 2) & 15] ^= accumulator;
         }
 
         return result;

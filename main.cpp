@@ -3,6 +3,8 @@
 #include <deque>
 #include <utility>
 
+#include "utils.h"
+
 #ifdef _WIN32
 #include <windows.h>
 #include <conio.h>
@@ -551,31 +553,58 @@ std::string getPathWithCompletion(const std::string &pr) {
 bool insertBatchIntoLockbox(iNode *node, const PreCalculatedBatch &batch, bool showProg = true) {
     if (batch.entries.empty()) return true;
 
-    // Note: preallocate() removed from new iNode interface
     if (showProg && batch.fileCount > 5) {
         printInfo("Processing " + formatSize(batch.getAllocationSize()) + " of data...");
     }
 
     int proc = 0;
+    int errors = 0;
     const int tot = static_cast<int>(batch.entries.size());
     const ProgressTracker prog(tot, "Encrypting", showProg);
-
-    for (const auto &[fsPath, internalPath, size, isDirectory]: batch.entries) {
-        if (isDirectory) {
-            node->addDirectory(internalPath);
-        } else if (size > 0) {
-            auto [sz, buf] = Filesystem::readFile(fsPath);
-            if (sz > 0 && !buf.empty())
+    node->beginBulkUpdate();
+    try {
+        for (const auto &[fsPath, internalPath, size, isDirectory]: batch.entries) {
+            if (isDirectory) {
+                if (node->addDirectory(internalPath) == 0) {
+                    printWarning("Failed to create directory: " + internalPath);
+                    errors++;
+                }
+            } else {
+                // Gestisce TUTTI i file, inclusi quelli vuoti (size == 0)
                 try {
-                    node->addFile(internalPath, buf.data(), sz);
+                    if (size == 0) {
+                        // File vuoto: aggiungi con buffer vuoto o nullptr
+                        node->addFile(internalPath, nullptr, 0);
+                    } else {
+                        // File con contenuto
+                        auto [sz, buf] = Filesystem::readFile(fsPath);
+                        if (buf.empty() && sz == 0 && size > 0) {
+                            printWarning("Failed to read: " + fsPath + " (" + formatSize(size) + ")");
+                            errors++;
+                            continue;
+                        }
+                        node->addFile(internalPath, buf.data(), sz);
+                    }
                 } catch (const std::exception &ex) {
                     printError("Failed: " + internalPath, ex.what());
+                    errors++;
                 }
+            }
+            prog.update(++proc);
         }
-        prog.update(++proc);
+    } catch (...) {
+        node->endBulkUpdate();
+        throw;
     }
+    node->endBulkUpdate();
+
     prog.finish();
-    return true;
+
+    if (errors > 0) {
+        printWarning("Completed with " + std::to_string(errors) + " error(s)");
+    }
+
+    return errors == 0;
 }
 
 // ==================== Help System ====================
@@ -1178,6 +1207,8 @@ void printUsage(const char *prog) {
             << "  -e <lockbox> <dest> <pass>       Extract lockbox to destination\n"
             << "  -c <text> <password>             Encrypt text\n"
             << "  -d <hex> <password>              Decrypt hex ciphertext\n"
+            << "  -cf <input> <output> <pass>      Encrypt a file (raw)\n"
+            << "  -df <input> <output> <pass>      Decrypt a file (raw)\n"
             << "  -h                               Show this help\n\n";
 }
 
@@ -1205,6 +1236,88 @@ int handleArgs(int argc, char *argv[]) {
             }
         } catch (const std::exception &e) {
             printError("Encryption failed", e.what());
+            delete oes;
+            return 1;
+        }
+        delete oes;
+        return 0;
+    }
+
+    if (arg1 == "-cf" && argc >= 5) {
+        const std::string inPath = argv[2];
+        const std::string outPath = argv[3];
+        if (!Filesystem::exists(inPath)) {
+            printError("File not found: " + inPath);
+            return 1;
+        }
+        auto [fileSize, fileData] = Filesystem::readFile(inPath);
+        if (fileSize == 0 || fileData.empty()) {
+            printError("Failed to read file or file is empty: " + inPath);
+            return 1;
+        }
+        auto *oes = new OES();
+        oes->set_key(argv[4]);
+        oes->extendWKey(OES_NUM_OF_BLOCKS);
+        try {
+            oes->load_data_raw(fileData.data(), fileSize);
+            oes->enc_adv();
+            if (auto *cb = oes->get_cipherBlock(); cb && !cb->isNull()) {
+                auto [d, s] = exportBlock(cb, OES_TYPE_RAW_UINT8);
+                if (d && s > 0) {
+                    if (Filesystem::writeFile(outPath, static_cast<const char *>(d), s)) {
+                        printSuccess("Encrypted: " + inPath + " -> " + outPath + " (" + formatSize(s) + ")");
+                    } else {
+                        printError("Failed to write output file: " + outPath);
+                    }
+                    free(d);
+                } else {
+                    printError("Encryption produced no output");
+                }
+                delete cb;
+            } else {
+                printError("Encryption failed");
+            }
+        } catch (const std::exception &e) {
+            printError("Encryption failed", e.what());
+            delete oes;
+            return 1;
+        }
+        delete oes;
+        return 0;
+    }
+
+    if (arg1 == "-df" && argc >= 5) {
+        const std::string inPath = argv[2];
+        const std::string outPath = argv[3];
+        if (!Filesystem::exists(inPath)) {
+            printError("File not found: " + inPath);
+            return 1;
+        }
+        auto [fileSize, fileData] = Filesystem::readFile(inPath);
+        if (fileSize == 0 || fileData.empty()) {
+            printError("Failed to read file or file is empty: " + inPath);
+            return 1;
+        }
+        auto *ib = importBlock(fileData.data(), fileSize, OES_TYPE_RAW_UINT8);
+        if (!ib) {
+            printError("Invalid encrypted file format");
+            return 1;
+        }
+        auto *oes = new OES();
+        oes->set_key(argv[4]);
+        oes->extendWKey(OES_NUM_OF_BLOCKS);
+        oes->load_cipher_block(ib, true);
+        oes->dec_adv();
+        if (const auto *pb = oes->get_plainBlock(); pb && !pb->isNull()) {
+            auto [data, size] = pb->toBytes();
+            if (Filesystem::writeFile(outPath, reinterpret_cast<const char *>(data), size)) {
+                printSuccess("Decrypted: " + inPath + " -> " + outPath + " (" + formatSize(size) + ")");
+            } else {
+                printError("Failed to write output file: " + outPath);
+            }
+            delete[] data;
+        } else {
+            printError("Decryption failed");
             delete oes;
             return 1;
         }

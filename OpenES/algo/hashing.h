@@ -8,7 +8,6 @@ public:
     static constexpr size_t STATE_SIZE = 64;
     static constexpr size_t STATE_MASK = STATE_SIZE - 1;
     static constexpr size_t NUM_ROUNDS = 32;
-    static constexpr size_t MAX_HASH_LEN = 2048;
     static constexpr size_t CARRY_SIZE = 4;
 
     // Costruttore
@@ -16,6 +15,7 @@ public:
 
     // API Pubblica
     MBLOCK* hash(const MBLOCK* data, size_t hashLen, MBLOCK** iv = nullptr);
+    bool hash_into(const MBLOCK* data, size_t hashLen, m_block* out, MBLOCK** iv = nullptr);
 
     // Debug
     void dumpState(const char* label = nullptr) const;
@@ -23,7 +23,7 @@ public:
 private:
     // Stato interno
     m_block m_state[STATE_SIZE]{};
-    m_block m_hashConstants[STATE_SIZE]{};
+    const m_block* m_hashConstants = nullptr;
     m_block m_carry[CARRY_SIZE]{};  // Carry vettoriale invece di scalare
 
     size_t m_domainCount = 0;

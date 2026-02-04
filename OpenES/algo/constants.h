@@ -62,6 +62,7 @@ constexpr m_block PRNG_MULT2 = 0x94D049BB133111EBULL; // da SplitMix64
 constexpr m_block MIX_CONST = 0x9E3779B97F4A7C15ULL; // golden ratio * 2^64
 
 #else // OES_MEM_SIZE == 128
+
 // x^128 + x^7 + x^2 + x + 1 (GCM-128, GHASH)
 // Primitivo, peso 5, standard NIST SP 800-38D
 constexpr m_block RED_POLY = MASK_TO_BLOCK_SIZE(0x0ULL, 0x87ULL); // solo low bits

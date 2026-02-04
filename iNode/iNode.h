@@ -120,6 +120,11 @@ public:
 
     void exportTo(const std::string &exportPath, const std::string &internalPath);
 
+    // Bulk mode: defer sync/log flushes until endBulkUpdate() for faster batch operations.
+    void beginBulkUpdate() const;
+
+    void endBulkUpdate() const;
+
     // ═══════════════════════════════════════════════════════════════════════
     // LOGGING
     // ═══════════════════════════════════════════════════════════════════════
@@ -237,12 +242,17 @@ private:
 
     void logOperation(const std::string &op, const std::string &details) const;
 
+    void appendLogEntries(const std::string &entries) const;
+
     // ═══════════════════════════════════════════════════════════════════════
     // MEMBERS
     // ═══════════════════════════════════════════════════════════════════════
 
     mutable std::unique_ptr<Block> root_;
     mutable inode_raw storage_;
+    mutable size_t bulkDepth_ = 0;
+    mutable bool pendingSync_ = false;
+    mutable std::string pendingLogEntries_;
     OES *cipher_;
     std::string path_;
 };

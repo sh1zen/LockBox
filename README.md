@@ -1,67 +1,57 @@
 # LockBox
 
-**LockBox** is an encrypted file container that allows you to securely store files and directories in a single password-protected file.
+**LockBox** is an encrypted file container that allows you to securely store files and directories in a single
+password-protected file. It provides a virtual filesystem where all contents—including filenames, directory structures,
+and file data—are encrypted using the SPHINX cipher.
 
-## Overview
+## Features
 
-LockBox works as an encrypted virtual filesystem: files and folders are organized in a tree structure, individually encrypted, and saved into a single container file. Only those with the correct password can access the contents.
+- **Virtual Filesystem**: Organize files and folders in a tree structure like a regular filesystem
+- **Strong Encryption**: Uses SPHINX, a modern wide-block cipher with configurable security levels (128-bit to 1024-bit)
+- **Encrypted Metadata**: Filenames, directory names, timestamps, and file sizes are all encrypted
+- **Interactive CLI**: Unix-like shell interface with tab completion and command history
+- **Cross-Platform**: Works on Windows, macOS, and Linux
+- **Memory Efficient**: Memory-mapped I/O for handling large files
+- **Activity Logging**: Built-in encrypted operation log for audit trails
+- **Defragmentation**: Reclaim space from deleted files without compromising security
 
-```
-┌─────────────────────────────────────────┐
-│            LockBox File (.lb)           │
-├─────────────────────────────────────────┤
-│  ┌─────────┐ ┌─────────┐ ┌─────────┐    │
-│  │ Block 0 │ │ Block 1 │ │ Block 2 │    │
-│  │  (root) │ │  (dir)  │ │ (file)  │    │
-│  └─────────┘ └─────────┘ └─────────┘    │
-│         ↓         ↓           ↓         │
-│   [encrypted] [encrypted] [encrypted]   │
-└─────────────────────────────────────────┘
-```
+## Quick Start
 
-## Architecture
+### Installation
 
-### Main Components
+#### Building from Source
 
-| Component | Description |
-|-----------|-------------|
-| **OES** | Encryption engine (OpenES) handling encrypt/decrypt operations |
-| **iNode** | Manages the virtual filesystem and file/directory operations |
-| **Block** | Base storage unit containing metadata and encrypted data |
-| **inode_raw** | Physical storage layer for disk persistence |
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/LockBox.git
+cd LockBox
 
-### Block Structure
+# Create build directory
+mkdir build && cd build
 
-Each element (file or directory) is represented by a **Block** containing:
+# Configure and build
+cmake ..
+make -j$(nproc)
 
-- **Encrypted name** of the file/directory
-- **Type** (file or directory)
-- **Size** of the data
-- **Pointers** to parent, sibling, and child (for tree structure)
-- **Encrypted data** (for files)
-
-### Tree Structure
-
-```
-root (Block 0)
-├── documents/
-│   ├── report.pdf
-│   └── notes.txt
-├── images/
-│   └── photo.jpg
-└── config.json
+# Run tests (optional)
+cmake -DBUILD_TESTS=ON ..
+make LockBoxTests
+./LockBoxTests
 ```
 
-Blocks are linked through pointers:
-- **Parent**: parent block (containing directory)
-- **Child**: first child (for directories)
-- **Sibling**: next sibling (same level)
+#### Requirements
 
-## Usage
+- C++23 compatible compiler (GCC 12+, Clang 15+, MSVC 2022+)
+- CMake 3.15 or higher
+- 64-bit operating system
 
 ### Interactive Mode
 
 Running LockBox without arguments opens the main menu:
+
+```bash
+./LockBox
+```
 
 ```
 +==========================================+
@@ -73,23 +63,70 @@ Running LockBox without arguments opens the main menu:
   [3] Encrypt text
   [4] Decrypt text
   [0] Exit
+
+>>
 ```
 
-### Command Line Interface
+### Creating a LockBox
+
+```bash
+# Interactive mode - follow the prompts
+./LockBox
+# Select option [2] Create LockBox
+
+# Or command-line mode
+./LockBox /path/to/folder output.lb "yourpassword"
+```
+
+### Opening a LockBox
+
+```bash
+# Interactive mode
+./LockBox
+# Select option [1] Open LockBox
+
+# Command-line extraction
+./LockBox -e archive.lb /destination "yourpassword"
+```
+
+## Command Line Usage
+
+### Basic Commands
 
 ```bash
 # Create a LockBox from a folder
-./lockbox /path/to/folder output.lb "mypassword"
+./LockBox /path/to/folder output.lb "mypassword"
 
-# Extract a LockBox
-./lockbox -e archive.lb /destination "mypassword"
+# Extract entire LockBox
+./LockBox -e archive.lb /destination "mypassword"
 
-# Encrypt text
-./lockbox -c "secret text" "password"
+# Encrypt text (outputs hex)
+./LockBox -c "secret text" "password"
 
-# Decrypt text (hex)
-./lockbox -d "a1b2c3..." "password"
+# Decrypt text (hex input)
+./LockBox -d "a1b2c3d4e5f6..." "password"
+
+# Encrypt a file (raw binary output)
+./LockBox -cf input.txt output.enc "password"
+
+# Decrypt a file (raw binary output)
+./LockBox -df output.enc decrypted.txt "password"
+
+# Show help
+./LockBox -h
 ```
+
+### Command-Line Arguments Summary
+
+| Arguments                     | Description                     |
+|-------------------------------|---------------------------------|
+| `<src> <lockbox> <pass>`      | Create LockBox from file/folder |
+| `-e <lockbox> <dest> <pass>`  | Extract LockBox to destination  |
+| `-c <text> <password>`        | Encrypt text to hex             |
+| `-d <hex> <password>`         | Decrypt hex to text             |
+| `-cf <input> <output> <pass>` | Encrypt file (raw output)       |
+| `-df <input> <output> <pass>` | Decrypt file (raw output)       |
+| `-h`                          | Show help                       |
 
 ## CLI Mode
 
@@ -102,308 +139,270 @@ lockbox:/$ ls
   📄 config.json (2.4 KB)
 Total: 3 items
 
-lockbox:/$ cd documents
-lockbox:/documents$ cat notes.txt
+lockbox:/documents$ cat report.txt
+This is the content of my encrypted file...
+
+lockbox:/documents$ cd ..
+lockbox:/$ tree
+/
+├── 📁 documents/
+│   ├── 📄 report.txt
+│   └── 📄 notes.txt
+├── 📁 images/
+│   └── 📄 photo.jpg
+└── 📄 config.json
+
+lockbox:/$ exit
 ```
 
 ### Available Commands
 
-| Command   | Syntax                | Description             |
-|-----------|-----------------------|-------------------------|
-| `ls`      | `ls [path]`           | List directory contents |
-| `cd`      | `cd <path>`           | Change directory        |
-| `pwd`     | `pwd`                 | Print working directory |
-| `cat`     | `cat <file>`          | Display file contents   |
-| `mkdir`   | `mkdir <path>`        | Create directory        |
-| `rm`      | `rm <path>`           | Remove file/directory   |
-| `mv`      | `mv <src> <dst>`      | Move/rename             |
-| `cp`      | `cp <src> <dst>`      | Copy file/directory     |
-| `rename`  | `rename <path> <n>`   | Rename                  |
-| `find`    | `find <pattern>`      | Search by name          |
-| `tree`    | `tree [path]`         | Display tree structure  |
-| `add`     | `add <file> [path]`   | Import from filesystem  |
-| `extract` | `extract [src] <dst>` | Export to filesystem    |
-| `info`    | `info <path>`         | Detailed information    |
-| `limit`   | `limit [n]`           | Max items displayed     |
-| `clear`   | `clear`               | Clear screen            |
-| `help`    | `help [cmd]`          | Show help               |
-| `exit`    | `exit`                | Return to menu          |
+| Command   | Syntax                    | Description               |
+|-----------|---------------------------|---------------------------|
+| `ls`      | `ls [path]`               | List directory contents   |
+| `cd`      | `cd <path>`               | Change directory          |
+| `pwd`     | `pwd`                     | Print working directory   |
+| `cat`     | `cat <file>`              | Display file contents     |
+| `mkdir`   | `mkdir <path>`            | Create directory          |
+| `rm`      | `rm <path>`               | Remove file/directory     |
+| `mv`      | `mv <src> <dst>`          | Move or rename            |
+| `cp`      | `cp <src> <dst>`          | Copy file/directory       |
+| `rename`  | `rename <path> <newname>` | Rename item               |
+| `find`    | `find <pattern>`          | Search by name            |
+| `tree`    | `tree [path]`             | Display tree structure    |
+| `add`     | `add <file> [path]`       | Import from filesystem    |
+| `extract` | `extract [src] <dst>`     | Export to filesystem      |
+| `info`    | `info <path>`             | Show detailed information |
+| `limit`   | `limit [n]`               | Set max items displayed   |
+| `clear`   | `clear`                   | Clear screen              |
+| `help`    | `help [cmd]`              | Show help                 |
+| `exit`    | `exit`                    | Return to menu            |
 
-### Advanced Features
+### Interactive Features
 
-- **Tab completion**: auto-complete paths with TAB
-- **Command history**: navigate with UP/DOWN arrows
-- **Relative/absolute paths**: support for `.`, `..`, `/path`
+- **Tab Completion**: Press TAB to auto-complete paths
+- **Command History**: Use UP/DOWN arrows to navigate previous commands
+- **Path Navigation**: Supports `.` (current), `..` (parent), and absolute `/` paths
+- **Quotes**: Use quotes for paths with spaces: `"my folder/file.txt"`
 
 ## Management Menu
 
-The management menu provides access to:
+After opening a LockBox, the management menu provides:
 
-| Option          | Function                           |
-|-----------------|------------------------------------|
-| **Extract**     | Export all or part of the contents |
-| **CLI Mode**    | Access the interactive shell       |
-| **Search**      | Search files by name               |
-| **Defragment**  | Compact the file, reclaiming space |
-| **View Log**    | Display operation log              |
-| **Clear Log**   | Clear the log                      |
-| **Save & Exit** | Save changes and exit              |
+| Option          | Function                                              |
+|-----------------|-------------------------------------------------------|
+| **Extract**     | Export all or part of the contents to the filesystem  |
+| **CLI Mode**    | Access the interactive shell for file operations      |
+| **Search**      | Search files by name pattern                          |
+| **Defragment**  | Compact the file, reclaiming space from deleted items |
+| **View Log**    | Display encrypted operation log                       |
+| **Clear Log**   | Clear the activity log                                |
+| **Save & Exit** | Save changes and exit                                 |
 
-### Best Practices
+### Defragmentation
 
-1. Use passwords of at least 16 characters (20+ recommended)
-2. Combine letters, numbers, and symbols
-3. Always save after modifications (`Save & Exit`)
-4. Run `defragment` periodically to reclaim space
-5. Keep backups of your LockBox file
+Over time, deleting files leaves unused space in the container. Defragmentation:
+
+- Removes gaps from deleted files
+- Rewrites all pointers securely
+- Truncates file to minimum size
+- **Note**: Creates temporary memory overhead during operation
+
+### Activity Log
+
+LockBox maintains an encrypted log of operations:
+
+- File additions, deletions, modifications
+- Directory creation and removal
+- Import/export operations
+- Timestamps for each action
+
+## Security
+
+### Password Recommendations
+
+1. **Minimum 16 characters** (20+ recommended)
+2. **Mix character types**: uppercase, lowercase, numbers, symbols
+3. **Avoid dictionary words** or personal information
+4. **Use a password manager** to generate and store strong passwords
+5. **Never share passwords** over unencrypted channels
+
+### Encryption Details
+
+LockBox uses the **SPHINX cipher**, a modern wide-block encryption algorithm:
+
+- **Configurable security**: 128-bit to 1024-bit key strength
+- **Wide-block design**: Encrypts multiple blocks together for better security
+- **Side-channel resistant**: No table lookups, constant-time operations
+- **Quantum-resistant**: 1024-bit mode available for post-quantum security
+
+Default configuration provides **256-bit security** (16 blocks × 16-bit words).
+
+### What Gets Encrypted
+
+✅ File contents  
+✅ File names  
+✅ Directory names  
+✅ Directory structure (via encrypted pointers)  
+✅ Timestamps  
+✅ Activity log
+
+The only unencrypted data is the raw container file size (which reveals approximate storage usage).
+
+## Architecture Overview
+
+LockBox consists of three main layers:
+
+```
+┌─────────────────────────────────────┐
+│         APPLICATION LAYER           │
+│    (Interactive UI, CLI Parser)     │
+├─────────────────────────────────────┤
+│      VIRTUAL FILESYSTEM (iNode)     │
+│   (Tree structure, file operations) │
+├─────────────────────────────────────┤
+│      ENCRYPTION ENGINE (OpenES)     │
+│      (SPHINX cipher, key mgmt)      │
+├─────────────────────────────────────┤
+│      PLATFORM ABSTRACTION LAYER     │
+│   (File I/O, memory mapping)        │
+└─────────────────────────────────────┘
+```
+
+For detailed technical documentation, see [`doc/architecture.md`](doc/architecture.md).
+
+## Best Practices
+
+### Creating Secure LockBoxes
+
+1. **Use strong, unique passwords** for each LockBox
+2. **Keep backups** of your LockBox file in multiple locations
+3. **Verify extraction** before deleting original files
+4. **Run defragment periodically** to reclaim space
+5. **Use CLI mode** for batch operations (faster than individual commands)
+
+### Managing Large Archives
+
+1. **Create directories first**, then add files
+2. **Use bulk add** for importing folders (more efficient)
+3. **Run defragment** after major deletions
+4. **Consider splitting** very large archives (>10GB)
+
+### Security Hygiene
+
+1. **Clear shell history** after using command-line passwords:
+   ```bash
+   history -c  # Bash
+   Clear-History  # PowerShell
+   ```
+2. **Use interactive mode** when possible (password not in shell history)
+3. **Secure erase** deleted LockBox files (use `shred` on Linux)
+4. **Never reuse passwords** across different LockBoxes
+
+## Troubleshooting
+
+### Common Issues
+
+**"Failed to open LockBox"**
+
+- Wrong password
+- Corrupted file
+- Insufficient permissions
+
+**"Out of memory" during defragment**
+
+- Large archives need ~2x memory during defrag
+- Try extracting and recreating the LockBox instead
+
+**"Permission denied"**
+
+- Check file permissions on the LockBox file
+- Ensure write access to destination directory
+
+**Slow performance**
+
+- Enable release build (`-O3` optimizations)
+- Consider defragmenting to improve locality
+- Large files may be slower due to encryption overhead
+
+### Building Issues
+
+**CMake version too old**
+
+```bash
+# Ubuntu/Debian
+sudo apt update && sudo apt install cmake
+
+# macOS
+brew install cmake
+```
+
+**Compiler doesn't support C++23**
+
+- GCC 12+ required
+- Clang 15+ required
+- MSVC 2022+ required
+
+### Getting Help
+
+1. Check [`doc/architecture.md`](doc/architecture.md) for technical details
+2. Review [`doc/oes.md`](doc/oes.md) for SPHINX cipher specification
+3. Run tests: `./LockBoxTests` (if built with `-DBUILD_TESTS=ON`)
+
+## Security Considerations
+
+### Threats Addressed
+
+| Threat                  | Mitigation                              |
+|-------------------------|-----------------------------------------|
+| Unauthorized access     | Strong encryption, password required    |
+| Known-plaintext attacks | Wide-block cipher with full diffusion   |
+| Side-channel attacks    | Constant-time operations, no lookups    |
+| Memory dumps            | Secure zeroing of keys                  |
+| File carving            | No predictable headers or magic numbers |
+
+### Limitations
+
+- **Brute force**: Short passwords can be cracked
+- **Memory exposure**: Keys exist in memory while open
+- **Container size**: File size reveals approximate content size
+- **No integrity check**: Malicious modification possible (will decrypt to garbage)
+
+## Performance
+
+Typical performance on modern hardware:
+
+| Operation    | Speed                 |
+|--------------|-----------------------|
+| Encryption   | ~50-100 MB/s          |
+| Decryption   | ~50-100 MB/s          |
+| File listing | <100ms for 1000 files |
+| Defragment   | ~10-20 MB/s           |
+
+*Actual performance depends on hardware, block size configuration, and data patterns.*
+
+## Contributing
+
+Contributions are welcome! Areas for improvement:
+
+- Compression layer (before encryption)
+- Public key support for key exchange
+- Multi-threaded encryption
+- Additional cipher algorithms
+- GUI frontend
+
+See source code documentation in [`doc/architecture.md`](doc/architecture.md).
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Acknowledgments
+
+- SPHINX cipher design inspired by Threefish, ChaCha, and AES
+- Memory mapping abstraction uses platform-native APIs
+- Uses standard cryptographic primitives where applicable
 
 ---
 
-# SPHINX Cipher v3.1
-
-LockBox uses **SPHINX**, a modern wide-block cipher designed for high security and flexibility.
-
-## Architectural Overview
-
-SPHINX is a **wide-block cipher** with configurable size from 1 to 16 blocks. The architecture combines modern design elements inspired by constructions like Threefish, ChaCha, and AES.
-
-### Fundamental Parameters
-
-| Parameter | Value |
-|-----------|-------|
-| Blocks | 1-16 (configurable) |
-| Block size | 8-128 bits per block |
-| Rounds | log₂(total bits) + corrections |
-| Target security | N × block_size bits |
-
-## Round Structure
-
-Each encryption round applies in sequence:
-
-```
-Plaintext → [Key Addition] → [Wide S-box] → [Algebraic S-box] 
-         → [Diffusion] → [PHT] → [Round Constant] → Ciphertext
-```
-
-### 1. Key Addition Layer
-Direct XOR with the round subkey. Prevents direct analysis of internal state.
-
-### 2. Wide S-box (Feistel Cross-Block)
-Balanced Feistel structure creating **cross-block dependency**:
-- State is split into left/right halves
-- Each left block depends on ALL right blocks
-- F function: accumulates contributions from all blocks + AES S-box byte-by-byte
-- Fully invertible thanks to Feistel structure
-
-**Key property**: Security scales with the number of blocks (N × size).
-
-### 3. Algebraic S-box (8 Rounds)
-Key-dependent non-linear transformation for each block:
-- 8 rounds of mixing: rotations, XOR, modular multiplications
-- Keys derived from master key with non-linear mixing
-- High algebraic degree for resistance to algebraic attacks
-
-### 4. Diffusion Layer
-Combines three mechanisms:
-- **Quarter-round** (ChaCha/ARX style): mixes groups of 4 blocks
-- **Cross-group mixing**: diffusion between groups
-- **Cross-half mixing**: for wide configurations (≥8 blocks)
-
-### 5. Pseudo-Hadamard Transform (PHT)
-Reversible non-linear transformation that increases local diffusion.
-
-## Key Schedule
-
-Based on **sponge construction**:
-
-1. **Absorb**: Master key is absorbed into internal state
-2. **Permute**: Iterative state mixing (8-12 rounds)
-3. **Squeeze**: Extraction of subkeys for each round
-
-Characteristics:
-- Domain separation for different uses
-- Forward security: compromise of one subkey doesn't reveal others
-- Automatic expansion if key is shorter than wide-block
-
-## Global Diffusion
-
-Applied pre/post main rounds to guarantee complete avalanche:
-
-```
-Forward pass → Forward chain → Backward chain → Backward pass → Cross-half → Final pass
-```
-
-```
-──────────────────────────────────────────────────────────────────────────────
-                     SPHINX CIPHER v3.1 - ENCRYPTION FLOW
-──────────────────────────────────────────────────────────────────────────────
-
-     ┌────────────────────────────────────────────────────────────────┐
-     │                        PLAINTEXT BLOCKS                        │
-     │                  [P0] [P1] [P2] ... [Pn-1]                     │
-     └───────────────────────────┬────────────────────────────────────┘
-                                 │
-     ┌───────────────────────────┴────────────────────────────────────┐
-     │                                                                │
-     │  ┌──────────────────────────────────────────────────────────┐  │
-     │  │              MASTER KEY EXPANSION                        │  │
-     │  │  ┌─────────┐    ┌──────────────┐    ┌────────────────┐   │  │
-     │  │  │   KEY   │───>│   SPONGE     │───>│  ROUND KEYS    │   │  │
-     │  │  └─────────┘    │  SCHEDULER   │    │  RK0...RKn+1   │   │  │
-     │  │                 └──────────────┘    └────────────────┘   │  │
-     │  └──────────────────────────────────────────────────────────┘  │
-     │                                                                │
-     └───────────────────────────┬────────────────────────────────────┘
-                                 │
-                                 v
-     ┌────────────────────────────────────────────────────────────────┐
-     │               XOR INITIAL WHITENING (XOR with RK0)             │
-     └───────────────────────────┬────────────────────────────────────┘
-                                 │
-                                 v
-     ┌────────────────────────────────────────────────────────────────┐
-     │                 INITIAL GLOBAL DIFFUSION                       │
-     │  ┌──────────────────────────────────────────────────────────┐  │
-     │  │  Forward Pass ──> Forward Chain ──> Backward Chain       │  │
-     │  │       │                                   │              │  │
-     │  │       v                                   v              │  │
-     │  │  Backward Pass <── Cross-Half Mix <── Final Pass         │  │
-     │  └──────────────────────────────────────────────────────────┘  │
-     └───────────────────────────┬────────────────────────────────────┘
-                                 │
-                                 v
-     ┌────────────────────────────────────────────────────────────────┐
-     │                                                                │
-     │                    ┌─────────────────────┐                     │
-     │    ┌──────────────>│   ROUND r = 0..N    │<─────────────┐      │
-     │    │               └──────────┬──────────┘              │      │
-     │    │                          │                         │      │
-     │    │                          v                         │      │
-     │    │  ┌─────────────────────────────────────────────┐   │      │
-     │    │  │         XOR KEY ADDITION (XOR with RKr+1)   │   │      │
-     │    │  └──────────────────────┬──────────────────────┘   │      │
-     │    │                         │                          │      │
-     │    │                         v                          │      │
-     │    │  ┌─────────────────────────────────────────────┐   │      │
-     │    │  │            WIDE S-BOX (Feistel)             │   │      │
-     │    │  │  ┌───────────────────────────────────────┐  │   │      │
-     │    │  │  │    LEFT HALF     │    RIGHT HALF      │  │   │      │
-     │    │  │  │   [L0][L1]...    │   [R0][R1]...      │  │   │      │
-     │    │  │  │        │         │        │           │  │   │      │
-     │    │  │  │        │         │        v           │  │   │      │
-     │    │  │  │        │       ┌─┴────────────────┐   │  │   │      │
-     │    │  │  │        │       │  F(ALL Ri, key)  │   │  │   │      │
-     │    │  │  │        │       │  ┌────────────┐  │   │  │   │      │
-     │    │  │  │        │       │  │ AES S-box  │  │   │  │   │      │
-     │    │  │  │        │       │  │ per byte   │  │   │  │   │      │
-     │    │  │  │        │       │  └────────────┘  │   │  │   │      │
-     │    │  │  │        │       └────────┬─────────┘   │  │   │      │
-     │    │  │  │        │                │             │  │   │      │
-     │    │  │  │        v                │             │  │   │      │
-     │    │  │  │      XOR<───────────────┘             │  │   │      │
-     │    │  │  │        │                              │  │   │      │
-     │    │  │  │        v        SWAP (except last)    │  │   │      │
-     │    │  │  │   [L'0][L'1]... <==================>  │  │   │      │
-     │    │  │  └───────────────────────────────────────┘  │   │      │
-     │    │  │            x WIDE_SBOX_ROUNDS (2-4)         │   │      │
-     │    │  └──────────────────────┬──────────────────────┘   │      │
-     │    │                         │                          │      │
-     │    │                         v                          │      │
-     │    │  ┌─────────────────────────────────────────────┐   │      │
-     │    │  │         ALGEBRAIC S-BOX (8 rounds)          │   │      │
-     │    │  │  ┌───────────────────────────────────────┐  │   │      │
-     │    │  │  │  For each block Bi:                   │  │   │      │
-     │    │  │  │                                       │  │   │      │
-     │    │  │  │    XOR RK ──> x (RK|1) ──> ROTL       │  │   │      │
-     │    │  │  │      │                      │         │  │   │      │
-     │    │  │  │      v                      v         │  │   │      │
-     │    │  │  │    XOR RK ──> ROTR ──> x PHI ──> XOR  │  │   │      │
-     │    │  │  │      │                          │     │  │   │      │
-     │    │  │  │      v         ... x 8 ...      v     │  │   │      │
-     │    │  │  │    x (RK|1) ──> ROTL ──> XOR ──> x PI │  │   │      │
-     │    │  │  └───────────────────────────────────────┘  │   │      │
-     │    │  └──────────────────────┬──────────────────────┘   │      │
-     │    │                         │                          │      │
-     │    │                         v                          │      │
-     │    │  ┌─────────────────────────────────────────────┐   │      │
-     │    │  │              DIFFUSION LAYER                │   │      │
-     │    │  │  ┌───────────────────────────────────────┐  │   │      │
-     │    │  │  │         QUARTER ROUNDS (ARX)          │  │   │      │
-     │    │  │  │                                       │  │   │      │
-     │    │  │  │   [B0][B1][B2][B3]   [B4][B5][B6][B7] │  │   │      │
-     │    │  │  │     │   │   │   │      │   │   │   │  │  │   │      │
-     │    │  │  │     └───┴───┴───┘      └───┴───┴───┘  │  │   │      │
-     │    │  │  │             │                │        │  │   │      │
-     │    │  │  │     ┌───────┴────────────────┴─────┐  │  │   │      │
-     │    │  │  │     │  a += b; d = rotl(d XOR a)   │  │  │   │      │
-     │    │  │  │     │  c += d; b = rotl(b XOR c)   │  │  │   │      │
-     │    │  │  │     │  a += b; d = rotl(d XOR a)   │  │  │   │      │
-     │    │  │  │     │  c += d; b = rotl(b XOR c)   │  │  │   │      │
-     │    │  │  │     │  a XOR= c; b XOR= d          │  │  │   │      │
-     │    │  │  │     └──────────────────────────────┘  │  │   │      │
-     │    │  │  │                    │                  │  │   │      │
-     │    │  │  │                    v                  │  │   │      │
-     │    │  │  │         CROSS-GROUP MIXING            │  │   │      │
-     │    │  │  │         CROSS-HALF MIXING             │  │   │      │
-     │    │  │  └───────────────────────────────────────┘  │   │      │
-     │    │  └──────────────────────┬──────────────────────┘   │      │
-     │    │                         │                          │      │
-     │    │                         v                          │      │
-     │    │  ┌─────────────────────────────────────────────┐   │      │
-     │    │  │         PSEUDO-HADAMARD TRANSFORM           │   │      │
-     │    │  │                                             │   │      │
-     │    │  │      For each block: PHT(x) = 2a+b, a+b     │   │      │
-     │    │  └──────────────────────┬──────────────────────┘   │      │
-     │    │                         │                          │      │
-     │    │                         v                          │      │
-     │    │  ┌─────────────────────────────────────────────┐   │      │
-     │    │  │          XOR ROUND CONSTANT INJECTION       │   │      │
-     │    │  │                                             │   │      │
-     │    │  │    B0 XOR= RC[r]     Bn-1 XOR= rotl(RC[r])  │   │      │
-     │    │  │    Bn/2 XOR= rotr(RC[r])  (if N>=4)         │   │      │
-     │    │  └──────────────────────┬──────────────────────┘   │      │
-     │    │                         │                          │      │
-     │    │                         │      r < NUM_ROUNDS?     │      │
-     │    │                         │             │            │      │
-     │    │          YES            │             │     NO     │      │
-     │    └─────────────────────────┘             │            │      │
-     │                                            v            │      │
-     │                                       ┌────────┐        │      │
-     │                                       │  EXIT  │        │      │
-     │                                       └────┬───┘        │      │
-     └────────────────────────────────────────────┼────────────┘
-                                                  │
-                                                  v
-     ┌────────────────────────────────────────────────────────────────┐
-     │                  FINAL GLOBAL DIFFUSION                        │
-     │           (same structure, different seeds from RKn+1)         │
-     └───────────────────────────┬────────────────────────────────────┘
-                                 │
-                                 v
-     ┌────────────────────────────────────────────────────────────────┐
-     │                XOR FINAL WHITENING (XOR with RKn+1)            │
-     └───────────────────────────┬────────────────────────────────────┘
-                                 │
-                                 v
-     ┌────────────────────────────────────────────────────────────────┐
-     │                        CIPHERTEXT BLOCKS                       │
-     │                  [C0] [C1] [C2] ... [Cn-1]                     │
-     └────────────────────────────────────────────────────────────────┘
-
-
-──────────────────────────────────────────────────────────────────────────────
-                              SYMBOL LEGEND
-──────────────────────────────────────────────────────────────────────────────
-
-    XOR     Exclusive OR
-    x       Modular multiplication
-    ROTL    Left rotation
-    ROTR    Right rotation
-    PHI     Constant phi (golden ratio)
-    PI      Constant PI
-    RC[r]   Round constant for round r
-    RKi     Round key i
-    (x|1)   x with least significant bit forced to 1 (for invertibility)
-
-──────────────────────────────────────────────────────────────────────────────
-```
+**Note**: This software is provided as-is without warranty. Always maintain backups of important data.

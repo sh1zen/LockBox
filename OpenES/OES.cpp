@@ -1,6 +1,5 @@
 #include "OES.h"
 
-#include "asymmetric.h"
 #include "block_ciphers.h"
 #include "hashing.h"
 #include "utils.h"
@@ -433,26 +432,6 @@ OES *OES::swap() {
     return this;
 }
 
-OES *OES::asymmetric() {
-    if (!this->plainBlock || this->plainBlock->isNull() || !this->wKey || this->wKey->isNull()) {
-        return this;
-    }
-
-    MBLOCK *result = oes_asymmetric(this->plainBlock, this->wKey, 0);
-
-    if (!result) {
-        return this;
-    }
-
-    if (cipherBlock) {
-        cipherBlock->secure_zero();
-        delete cipherBlock;
-    }
-    this->cipherBlock = result;
-
-    return this;
-}
-
 OES *OES::dump(const bool printable) {
     if (this->oKey && !this->oKey->isNull()) {
         printf("originalKey::");
@@ -642,4 +621,11 @@ std::pair<void *, size_t> OES::get_cipher_data() const {
         return std::make_pair(nullptr, 0);
     }
     return this->cipherBlock->toBytes();
+}
+
+std::pair<void *, size_t> OES::get_cipher_data_raw() const {
+    if (!this->cipherBlock || this->cipherBlock->isNull()) {
+        return std::make_pair(nullptr, static_cast<size_t>(0));
+    }
+    return this->cipherBlock->toBytes_raw();
 }

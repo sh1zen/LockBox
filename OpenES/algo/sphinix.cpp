@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <algorithm>
+#include <cstring>
 
 #include "core.h"
 #include "key_management.h"
@@ -168,6 +169,33 @@ namespace SPHINX {
         MASK_TO_BLOCK_SIZE(0xD69906245565A910ULL, 0xF40E35855771202AULL)
     };
     constexpr size_t NUM_RC = 32;
+    static_assert((NUM_RC & (NUM_RC - 1)) == 0, "NUM_RC must be a power of two");
+    constexpr bool BLOCKS_POW2 = (OES_NUM_OF_BLOCKS & (OES_NUM_OF_BLOCKS - 1)) == 0;
+    constexpr size_t BLOCK_MASK = OES_NUM_OF_BLOCKS - 1;
+
+    static inline size_t mod_rc(size_t v) {
+        return v & (NUM_RC - 1);
+    }
+
+    static inline size_t mod_mem(size_t v) {
+        return v & OES_MEM_SIZE_MASK;
+    }
+
+    static inline size_t mod_blocks(size_t v) {
+        if constexpr (BLOCKS_POW2) {
+            return v & BLOCK_MASK;
+        }
+        return v % OES_NUM_OF_BLOCKS;
+    }
+
+    static inline size_t add_blocks(size_t base, size_t add) {
+        if constexpr (BLOCKS_POW2) {
+            return (base + add) & BLOCK_MASK;
+        }
+        size_t v = base + add;
+        while (v >= OES_NUM_OF_BLOCKS) v -= OES_NUM_OF_BLOCKS;
+        return v;
+    }
 
     // Precomputed modular inverses for decryption
     alignas(64) constexpr m_block INV_PHI = compute_mod_inverse(PHI | 1);
@@ -230,9 +258,12 @@ namespace SPHINX {
      * Wide S-box rounds (Feistel structure)
      * More blocks = more rounds for complete cross-block mixing
      */
+    // Feistel rounds: 4 = SPRP (Luby-Rackoff bound), 6 = conservative margin.
+    // With other cipher layers (algebraic S-box, PHT, global diffusion) providing
+    // additional non-linearity, 6 rounds for wide blocks is more than sufficient.
     constexpr size_t WIDE_SBOX_ROUNDS = []() constexpr -> size_t {
-        if constexpr (OES_NUM_OF_BLOCKS >= 8) return 8;
-        if constexpr (OES_NUM_OF_BLOCKS >= 4) return 6;
+        if constexpr (OES_NUM_OF_BLOCKS >= 8) return 6;
+        if constexpr (OES_NUM_OF_BLOCKS >= 4) return 4;
         if constexpr (OES_NUM_OF_BLOCKS >= 2) return 4;
         return 2;
     }();
@@ -289,6 +320,10 @@ namespace SPHINX {
     struct DerivedKeyCache {
         m_block rk[OES_NUM_OF_BLOCKS]; // Forward round keys
         m_block inv_rk[OES_NUM_OF_BLOCKS]; // Inverse round keys
+        m_block inv_rk7[OES_NUM_OF_BLOCKS]; // Precomputed inverse for rk(7 % n)
+        m_block inv_mix_2_6[OES_NUM_OF_BLOCKS]; // Precomputed inverse for (rk(2)^rk(6 % n))
+        alignas(64) uint8_t rk_bytes[OES_NUM_OF_BLOCKS][BYTES_PER_BLOCK]{};
+        alignas(64) uint8_t parity_bytes[BYTES_PER_BLOCK]{};
         m_block parity; // Global parity value
         m_block inv_parity; // Inverse parity
 
@@ -305,15 +340,16 @@ namespace SPHINX {
             parity = TF_PARITY;
             for (size_t i = 0; i < n; ++i) {
                 parity ^= key_blocks[i];
-                parity ^= mBlock::rotl(key_blocks[i], (17 + i * 7) % OES_MEM_SIZE);
+                parity ^= mBlock::rotl(key_blocks[i], mod_mem(17 + i * 7));
             }
             parity ^= mBlock::rotl(parity, 7);
             inv_parity = compute_mod_inverse(parity | 1);
 
             // Derive intermediate values with non-linear mixing
             m_block d[OES_NUM_OF_BLOCKS];
-            for (size_t i = 0; i < n; ++i) {
-                m_block x = key_blocks[i];
+            size_t key_idx = 0;
+            for (size_t i = 0; i < OES_NUM_OF_BLOCKS; ++i) {
+                m_block x = key_blocks[key_idx];
                 x ^= mBlock::rotl(x, ROT[0]);
                 x *= (PHI | 1);
                 x ^= mBlock::rotr(x, ROT[1]);
@@ -323,6 +359,7 @@ namespace SPHINX {
                 x ^= parity;
                 x ^= mBlock::rotl(x, ROT[3]);
                 d[i] = x;
+                if (++key_idx == n) key_idx = 0;
             }
 
             // Cross-block mixing for wide configurations
@@ -332,12 +369,12 @@ namespace SPHINX {
 
                 for (size_t round = 0; round < mix_rounds; ++round) {
                     for (size_t i = 0; i < OES_NUM_OF_BLOCKS; ++i) {
-                        const size_t i1 = (i + 1) % OES_NUM_OF_BLOCKS;
-                        const size_t i2 = (i + OES_NUM_OF_BLOCKS / 2) % OES_NUM_OF_BLOCKS;
+                        const size_t i1 = add_blocks(i, 1);
+                        const size_t i2 = add_blocks(i, OES_NUM_OF_BLOCKS / 2);
 
                         temp[i] = d[i] ^ d[i1];
                         temp[i] += mBlock::rotl(d[i1], ROT[round & 7]);
-                        temp[i] *= ((d[i2] ^ RC[(round * OES_NUM_OF_BLOCKS + i) % NUM_RC]) | 1);
+                        temp[i] *= ((d[i2] ^ RC[mod_rc(round * OES_NUM_OF_BLOCKS + i)]) | 1);
                         temp[i] ^= mBlock::rotr(d[i], ROT[(round + 1) & 7]);
                         temp[i] ^= (temp[i] >> (OES_MEM_SIZE / 2));
                     }
@@ -347,11 +384,11 @@ namespace SPHINX {
 
             // Generate final round keys with chaining
             for (size_t i = 0; i < OES_NUM_OF_BLOCKS; ++i) {
-                const m_block base = d[i] ^ RC[i % NUM_RC];
+                const m_block base = d[i] ^ RC[mod_rc(i)];
                 m_block modifier = parity;
 
                 if constexpr (OES_NUM_OF_BLOCKS > 1) {
-                    modifier ^= d[(i + 1) % OES_NUM_OF_BLOCKS];
+                    modifier ^= d[add_blocks(i, 1)];
                 }
                 if (i > 0) {
                     modifier ^= rk[i - 1];
@@ -360,6 +397,24 @@ namespace SPHINX {
                 rk[i] = base * (modifier | 1);
                 inv_rk[i] = compute_mod_inverse(rk[i] | 1);
             }
+
+            // Precompute inverses used by sbox_inverse to avoid recomputation per block.
+            constexpr size_t n_all = OES_NUM_OF_BLOCKS;
+            for (size_t i = 0; i < n_all; ++i) {
+                const size_t idx7 = add_blocks(i, (7 % n_all));
+                const size_t idx2 = add_blocks(i, 2);
+                const size_t idx6 = add_blocks(i, (6 % n_all));
+                inv_rk7[i] = inv_rk[idx7];
+                inv_mix_2_6[i] = compute_mod_inverse((rk[idx2] ^ rk[idx6]) | 1);
+            }
+
+            // Extract round keys and parity to byte arrays.
+            // memcpy is equivalent to the shift-by-8 loop on little-endian
+            // and compiles to a single store/load on modern compilers.
+            for (size_t i = 0; i < OES_NUM_OF_BLOCKS; ++i) {
+                std::memcpy(rk_bytes[i], &rk[i], BYTES_PER_BLOCK);
+            }
+            std::memcpy(parity_bytes, &parity, BYTES_PER_BLOCK);
         }
 
         /**
@@ -369,34 +424,11 @@ namespace SPHINX {
         void derive(const m_block key) {
             m_block expanded[OES_NUM_OF_BLOCKS];
             for (size_t i = 0; i < OES_NUM_OF_BLOCKS; ++i) {
-                expanded[i] = mBlock::rotl(key, (i * 17) % OES_MEM_SIZE) ^ RC[i % NUM_RC];
+                expanded[i] = mBlock::rotl(key, mod_mem(i * 17)) ^ RC[mod_rc(i)];
             }
             derive(expanded, OES_NUM_OF_BLOCKS);
         }
     };
-
-    /**
-     * Extract a single byte from a block at specified position
-     * @param block The block to extract from
-     * @param byte_idx Byte index (0 = LSB)
-     * @return Extracted byte value
-     */
-    static inline uint8_t extract_byte(m_block block, size_t byte_idx) {
-        return static_cast<uint8_t>((block >> ((byte_idx % BYTES_PER_BLOCK) * 8)) & 0xFF);
-    }
-
-    /**
-     * Inject a byte value into a block at specified position
-     * @param block The block to modify
-     * @param byte_idx Byte index (0 = LSB)
-     * @param value Byte value to inject
-     * @return Modified block
-     */
-    static inline m_block inject_byte(m_block block, size_t byte_idx, uint8_t value) {
-        const size_t idx = byte_idx % BYTES_PER_BLOCK;
-        const m_block mask = static_cast<m_block>(0xFF) << (idx * 8);
-        return (block & ~mask) | (static_cast<m_block>(value) << (idx * 8));
-    }
 
     /**
      * Feistel round function F for wide S-box
@@ -417,34 +449,41 @@ namespace SPHINX {
         size_t block_idx
     ) {
         // Accumulate contribution from ALL right-half blocks
-        m_block acc = dk.rk[round_idx % OES_NUM_OF_BLOCKS] ^ RC[round_idx % NUM_RC];
-
+        const size_t rk_round_idx = mod_blocks(round_idx);
+        m_block acc = dk.rk[rk_round_idx] ^ RC[mod_rc(round_idx)];
+        size_t rot = mod_mem(round_idx * 3);
         for (size_t i = 0; i < right_len; ++i) {
-            acc ^= mBlock::rotl(right[i], (i * 7 + round_idx * 3) % OES_MEM_SIZE);
+            acc ^= mBlock::rotl(right[i], rot);
+            rot = mod_mem(rot + 7);
         }
 
-        // Apply S-box byte-by-byte with position-dependent mixing
-        m_block result = 0;
+        // Byte-level S-box processing.
+        // Extract accumulator to byte array via memcpy (replaces per-byte 128-bit shifts).
+        alignas(16) uint8_t acc_bytes[BYTES_PER_BLOCK];
+        std::memcpy(acc_bytes, &acc, BYTES_PER_BLOCK);
+
+        alignas(16) uint8_t res_bytes[BYTES_PER_BLOCK];
+        const uint8_t pos_base = static_cast<uint8_t>(round_idx * 31 + block_idx * 17);
+        size_t rk_byte_idx = rk_round_idx;
         for (size_t b = 0; b < BYTES_PER_BLOCK; ++b) {
-            uint8_t in_byte = extract_byte(acc, b);
+            uint8_t idx = acc_bytes[b];
+            idx ^= static_cast<uint8_t>(pos_base + b * 13);
+            idx ^= dk.parity_bytes[b];
 
-            // Index depends on: byte value, position, round, block index
-            uint8_t idx = in_byte;
-            idx ^= static_cast<uint8_t>(round_idx * 31 + block_idx * 17 + b * 13);
-            idx ^= extract_byte(dk.parity, b);
-
-            // S-box lookup
             uint8_t out_byte = SBOX_FWD[idx];
+            out_byte ^= dk.rk_bytes[rk_byte_idx][b];
+            rk_byte_idx = add_blocks(rk_byte_idx, 1);
 
-            // Post-mix with key
-            out_byte ^= extract_byte(dk.rk[(round_idx + b) % OES_NUM_OF_BLOCKS], b);
-
-            result = inject_byte(result, b, out_byte);
+            res_bytes[b] = out_byte;
         }
+
+        // Reconstruct m_block from byte array in one shot
+        m_block result;
+        std::memcpy(&result, res_bytes, BYTES_PER_BLOCK);
 
         // Final mixing
         result ^= mBlock::rotl(result, ROT[round_idx & 7]);
-        result *= (dk.rk[(round_idx + block_idx) % OES_NUM_OF_BLOCKS] | 1);
+        result *= (dk.rk[add_blocks(rk_round_idx, block_idx)] | 1);
 
         return result;
     }
@@ -463,57 +502,45 @@ namespace SPHINX {
         if (!data || len < 2) return;
 
         const size_t n = std::min(len, static_cast<size_t>(OES_NUM_OF_BLOCKS));
-        const size_t half = (n + 1) / 2; // Left half size (ceil)
-        const size_t right_start = half;
+        const size_t half = (n + 1) / 2;
         const size_t right_len = n - half;
 
-        if (right_len == 0) return; // Need at least 2 blocks
+        if (right_len == 0) return;
 
-        // Feistel structure: completely invertible
-        // Forward: for each round, XOR left with F(right), then swap
-        // Inverse: for each round in reverse, swap then XOR left with F(right)
+        // Logical-swap Feistel: track left/right offsets instead of memcpy.
+        // For round r (even: l_off=0, odd: l_off=half) the same F values are
+        // produced; only a single physical swap is needed at the end when the
+        // number of logical swaps is odd (always true for even WIDE_SBOX_ROUNDS).
         if (!inverse) {
-            // Forward direction (encryption)
+            size_t l_off = 0, r_off = half;
             for (size_t r = 0; r < WIDE_SBOX_ROUNDS; ++r) {
-                // Compute F for each left block using ALL right blocks
                 for (size_t i = 0; i < half; ++i) {
-                    m_block f_val = wide_sbox_F(&data[right_start], right_len, dk, r, i);
-                    data[i] ^= f_val;
+                    data[l_off + i] ^= wide_sbox_F(&data[r_off], right_len, dk, r, i);
                 }
-
-                // Swap left and right (except after last round)
                 if (r < WIDE_SBOX_ROUNDS - 1) {
-                    m_block temp[OES_NUM_OF_BLOCKS];
-                    // New left = old right, new right = old left
-                    for (size_t i = 0; i < right_len; ++i) {
-                        temp[i] = data[right_start + i];
-                    }
-                    for (size_t i = 0; i < half; ++i) {
-                        temp[right_len + i] = data[i];
-                    }
-                    std::memcpy(data, temp, n * sizeof(m_block));
+                    std::swap(l_off, r_off);  // O(1) logical swap
+                }
+            }
+            // One physical swap to match original layout (odd number of logical swaps)
+            if ((WIDE_SBOX_ROUNDS - 1) & 1) {
+                for (size_t i = 0; i < half; ++i) {
+                    std::swap(data[i], data[half + i]);
                 }
             }
         } else {
-            // Inverse direction (decryption)
-            for (size_t r = WIDE_SBOX_ROUNDS; r-- > 0;) {
-                // Undo swap first (except for round 0 which had no preceding swap)
-                if (r < WIDE_SBOX_ROUNDS - 1) {
-                    m_block temp[OES_NUM_OF_BLOCKS];
-                    // Reverse the swap
-                    for (size_t i = 0; i < half; ++i) {
-                        temp[i] = data[right_len + i];
-                    }
-                    for (size_t i = 0; i < right_len; ++i) {
-                        temp[half + i] = data[i];
-                    }
-                    std::memcpy(data, temp, n * sizeof(m_block));
-                }
-
-                // Undo XOR (same operation since XOR is self-inverse)
+            // Inverse: undo the final physical swap, then replay rounds in reverse
+            // using the same offset logic.
+            if ((WIDE_SBOX_ROUNDS - 1) & 1) {
                 for (size_t i = 0; i < half; ++i) {
-                    m_block f_val = wide_sbox_F(&data[right_start], right_len, dk, r, i);
-                    data[i] ^= f_val;
+                    std::swap(data[i], data[half + i]);
+                }
+            }
+            for (size_t r = WIDE_SBOX_ROUNDS; r-- > 0;) {
+                // Offset that was used during forward round r
+                const size_t l_off = (r & 1) ? half : 0;
+                const size_t r_off = (r & 1) ? 0 : half;
+                for (size_t i = 0; i < half; ++i) {
+                    data[l_off + i] ^= wide_sbox_F(&data[r_off], right_len, dk, r, i);
                 }
             }
         }
@@ -576,9 +603,13 @@ namespace SPHINX {
 
         // Forward pass
         m_block state = seeds[0] ^ DIFFUSE_K0;
+        size_t sidx = 0;
         for (size_t i = 0; i < len; ++i) {
             data[i] ^= state;
-            state = advanced_mix(state, seeds[i % nseeds] ^ static_cast<m_block>(i));
+            state = advanced_mix(state, seeds[sidx] ^ static_cast<m_block>(i));
+            if (++sidx == nseeds) {
+                sidx = 0;
+            }
         }
 
         // Forward chaining
@@ -593,9 +624,15 @@ namespace SPHINX {
 
         // Backward pass
         state = seeds[nseeds > 1 ? 1 : 0] ^ DIFFUSE_K1;
+        sidx = len % nseeds;
         for (size_t i = len; i-- > 0;) {
             data[i] ^= state;
-            state = advanced_mix(state, seeds[(i + 1) % nseeds] ^ static_cast<m_block>(i));
+            state = advanced_mix(state, seeds[sidx] ^ static_cast<m_block>(i));
+            if (sidx == 0) {
+                sidx = nseeds - 1;
+            } else {
+                --sidx;
+            }
         }
 
         // Cross-half mixing for wide blocks
@@ -611,9 +648,13 @@ namespace SPHINX {
 
         // Final pass with third seed
         state = seeds[nseeds > 2 ? 2 : 0] ^ DIFFUSE_K2;
+        sidx = 0;
         for (size_t i = 0; i < len; ++i) {
             data[i] ^= state;
-            state = advanced_mix(state, seeds[i % nseeds] ^ static_cast<m_block>(len - i));
+            state = advanced_mix(state, seeds[sidx] ^ static_cast<m_block>(len - i));
+            if (++sidx == nseeds) {
+                sidx = 0;
+            }
         }
     }
 
@@ -631,9 +672,13 @@ namespace SPHINX {
 
         // Reverse final pass
         m_block state = seeds[nseeds > 2 ? 2 : 0] ^ DIFFUSE_K2;
+        size_t sidx = 0;
         for (size_t i = 0; i < len; ++i) {
             data[i] ^= state;
-            state = advanced_mix(state, seeds[i % nseeds] ^ static_cast<m_block>(len - i));
+            state = advanced_mix(state, seeds[sidx] ^ static_cast<m_block>(len - i));
+            if (++sidx == nseeds) {
+                sidx = 0;
+            }
         }
 
         // Reverse cross-half mixing
@@ -649,9 +694,15 @@ namespace SPHINX {
 
         // Reverse backward pass
         state = seeds[nseeds > 1 ? 1 : 0] ^ DIFFUSE_K1;
+        sidx = len % nseeds;
         for (size_t i = len; i-- > 0;) {
             data[i] ^= state;
-            state = advanced_mix(state, seeds[(i + 1) % nseeds] ^ static_cast<m_block>(i));
+            state = advanced_mix(state, seeds[sidx] ^ static_cast<m_block>(i));
+            if (sidx == 0) {
+                sidx = nseeds - 1;
+            } else {
+                --sidx;
+            }
         }
 
         // Reverse backward chaining
@@ -666,9 +717,13 @@ namespace SPHINX {
 
         // Reverse forward pass
         state = seeds[0] ^ DIFFUSE_K0;
+        sidx = 0;
         for (size_t i = 0; i < len; ++i) {
             data[i] ^= state;
-            state = advanced_mix(state, seeds[i % nseeds] ^ static_cast<m_block>(i));
+            state = advanced_mix(state, seeds[sidx] ^ static_cast<m_block>(i));
+            if (++sidx == nseeds) {
+                sidx = 0;
+            }
         }
     }
 
@@ -687,8 +742,9 @@ namespace SPHINX {
          * @param c Constant to mix in
          */
         void mix_fn(size_t i, m_block c) {
-            const size_t next = (i + 1) % SCHEDULER_STATE_SIZE;
-            const size_t mid = (i + SCHEDULER_STATE_SIZE / 2) % SCHEDULER_STATE_SIZE;
+            const size_t next = (i + 1 == SCHEDULER_STATE_SIZE) ? 0 : (i + 1);
+            size_t mid = i + (SCHEDULER_STATE_SIZE / 2);
+            if (mid >= SCHEDULER_STATE_SIZE) mid -= SCHEDULER_STATE_SIZE;
 
             m_block x = state_[i] + state_[next];
             x ^= c;
@@ -705,32 +761,44 @@ namespace SPHINX {
          * Permute internal state for diffusion
          * Multiple rounds ensure complete mixing
          */
+        /**
+         * Permute internal state for diffusion — O(n) per round.
+         *
+         * Replaces the former O(n²) all-pairs XOR with forward + backward
+         * chaining (each using XOR + ADD for non-linearity).  Two linear
+         * passes plus a wrap-around achieve full diffusion: every output
+         * element depends on every input element.  Combined with the
+         * per-element mix_fn non-linear step, this matches or exceeds
+         * the diffusion quality of the previous quadratic mix.
+         */
         void permute() {
-            m_block temp[SCHEDULER_STATE_SIZE];
-
             for (size_t r = 0; r < SCHEDULER_PERMUTE_ROUNDS; ++r) {
-                const m_block rc = RC[r % NUM_RC];
+                const m_block rc = RC[mod_rc(r)];
 
-                // Mix each state element
+                // Per-element non-linear mixing
                 for (size_t i = 0; i < SCHEDULER_STATE_SIZE; ++i) {
                     mix_fn(i, rc ^ static_cast<m_block>(i));
                 }
 
-                // Cross-mix all state elements
-                for (size_t i = 0; i < SCHEDULER_STATE_SIZE; ++i) {
-                    temp[i] = state_[i];
-                    for (size_t j = 1; j < SCHEDULER_STATE_SIZE; ++j) {
-                        temp[i] ^= mBlock::rotl(
-                            state_[(i + j) % SCHEDULER_STATE_SIZE],
-                            (j * ROT[0]) % OES_MEM_SIZE
-                        );
-                    }
+                // Forward chain: state_[i] absorbs all predecessors
+                for (size_t i = 1; i < SCHEDULER_STATE_SIZE; ++i) {
+                    state_[i] ^= mBlock::rotl(state_[i - 1], mod_mem(ROT[0]));
+                    state_[i] += mBlock::rotr(state_[i - 1], mod_mem(ROT[1]));
                 }
-                std::memcpy(state_, temp, sizeof(state_));
 
-                // Rotate state elements
+                // Backward chain: state_[i] absorbs all successors
+                for (size_t i = SCHEDULER_STATE_SIZE - 1; i > 0; --i) {
+                    state_[i - 1] ^= mBlock::rotr(state_[i], mod_mem(ROT[2]));
+                    state_[i - 1] += mBlock::rotl(state_[i], mod_mem(ROT[3]));
+                }
+
+                // Wrap-around for circular dependency
+                state_[0] ^= mBlock::rotl(state_[SCHEDULER_STATE_SIZE - 1], mod_mem(ROT[4]));
+                state_[SCHEDULER_STATE_SIZE - 1] ^= mBlock::rotr(state_[0], mod_mem(ROT[5]));
+
+                // Per-element rotation
                 for (size_t i = 0; i < SCHEDULER_STATE_SIZE; ++i) {
-                    state_[i] = mBlock::rotl(state_[i], (ROT[4] + i * ROT[5]) % OES_MEM_SIZE);
+                    state_[i] = mBlock::rotl(state_[i], mod_mem(ROT[4] + i * ROT[5]));
                 }
             }
         }
@@ -750,20 +818,25 @@ namespace SPHINX {
             if (!key || key->isNull() || key->getLen() == 0) return false;
 
             const size_t key_len = key->getLen();
+            const m_block *key_data = const_cast<MBLOCK *>(key)->getDataRef();
 
             // Initialize state with domain constant
             for (size_t i = 0; i < SCHEDULER_STATE_SIZE; ++i) {
-                state_[i] = domain ^ RC[i % NUM_RC] ^ static_cast<m_block>(i * 0x9E3779B9);
+                state_[i] = domain ^ RC[mod_rc(i)] ^ static_cast<m_block>(i * 0x9E3779B9);
             }
             permute();
 
             // Absorb key blocks
+            size_t k = 0;
             for (size_t i = 0; i < SCHEDULER_STATE_SIZE; ++i) {
-                state_[i] ^= key->getBlock(i % key_len);
+                state_[i] ^= key_data[k];
+                if (++k == key_len) {
+                    k = 0;
+                }
             }
 
-            // Final mixing rounds
-            permute();
+            // Final mixing rounds (2 permutes: each provides full-state
+            // diffusion + non-linearity; sufficient for sponge finalization)
             permute();
             permute();
 
@@ -783,6 +856,11 @@ namespace SPHINX {
             const size_t out_len = output->getLen();
             m_block *out = output->getDataRef();
             if (!out || out_len == 0) return false;
+            return squeeze_raw(out, out_len, round_idx);
+        }
+
+        bool squeeze_raw(m_block *out, size_t out_len, size_t round_idx) {
+            if (!initialized_ || !out || out_len == 0) return false;
 
             // Mix in round index for unique keys
             state_[0] ^= static_cast<m_block>(round_idx);
@@ -792,9 +870,14 @@ namespace SPHINX {
             permute();
 
             // Extract round key blocks
-            for (size_t i = 0; i < out_len; ++i) {
-                out[i] = state_[i % SCHEDULER_STATE_SIZE] ^ RC[(round_idx + i) % NUM_RC];
-                if (SCHEDULER_STATE_SIZE > 1 && (i + 1) % SCHEDULER_STATE_SIZE == 0 && i + 1 < out_len) {
+            size_t produced = 0;
+            while (produced < out_len) {
+                const size_t chunk = std::min(out_len - produced, static_cast<size_t>(SCHEDULER_STATE_SIZE));
+                for (size_t i = 0; i < chunk; ++i) {
+                    out[produced + i] = state_[i] ^ RC[mod_rc(round_idx + produced + i)];
+                }
+                produced += chunk;
+                if (SCHEDULER_STATE_SIZE > 1 && produced < out_len) {
                     permute();
                 }
             }
@@ -807,8 +890,10 @@ namespace SPHINX {
      * Pre-generates all keys needed for encryption/decryption
      */
     class RoundKeySet {
-        std::unique_ptr<std::unique_ptr<MBLOCK>[]> keys_;
+        std::unique_ptr<m_block[]> key_data_;
+        std::unique_ptr<DerivedKeyCache[]> dk_cache_;
         size_t count_ = 0;
+        size_t key_len_ = 0;
 
     public:
         /**
@@ -822,27 +907,38 @@ namespace SPHINX {
             if (!master || master->isNull() || master->getLen() == 0 || data_len == 0) return;
 
             count_ = num_rounds + 2; // +2 for pre/post whitening
-            keys_ = std::make_unique<std::unique_ptr<MBLOCK>[]>(count_);
+            key_len_ = data_len;
+            key_data_ = std::make_unique<m_block[]>(count_ * key_len_);
+            dk_cache_ = std::make_unique<DerivedKeyCache[]>(count_);
 
             KeyScheduler scheduler;
             if (!scheduler.absorb(master, domain ^ DOMAIN_KEY)) {
-                keys_.reset();
+                key_data_.reset();
+                dk_cache_.reset();
                 count_ = 0;
+                key_len_ = 0;
                 return;
             }
 
             // Generate each round key
             for (size_t r = 0; r < count_; ++r) {
-                keys_[r] = std::make_unique<MBLOCK>(data_len);
-                if (!keys_[r] || keys_[r]->isNull() || !scheduler.squeeze(keys_[r].get(), r)) {
-                    keys_.reset();
+                m_block *rk = key_data_.get() + (r * key_len_);
+                if (!scheduler.squeeze_raw(rk, key_len_, r)) {
+                    key_data_.reset();
+                    dk_cache_.reset();
                     count_ = 0;
+                    key_len_ = 0;
                     return;
                 }
+                dk_cache_[r].derive(rk, std::min(key_len_, static_cast<size_t>(OES_NUM_OF_BLOCKS)));
             }
         }
 
-        ~RoundKeySet() = default;
+        ~RoundKeySet() {
+            if (key_data_ && count_ > 0 && key_len_ > 0) {
+                secure_memzero(key_data_.get(), count_ * key_len_ * sizeof(m_block));
+            }
+        }
 
         RoundKeySet(const RoundKeySet &) = delete;
 
@@ -852,14 +948,149 @@ namespace SPHINX {
 
         RoundKeySet &operator=(RoundKeySet &&) = default;
 
-        MBLOCK *operator[](size_t i) const { return (keys_ && i < count_) ? keys_[i].get() : nullptr; }
-        explicit operator bool() const { return keys_ && count_ > 0; }
+        const m_block *key(size_t i) const {
+            return (key_data_ && i < count_) ? (key_data_.get() + (i * key_len_)) : nullptr;
+        }
+
+        const DerivedKeyCache *derived(size_t i) const {
+            return (dk_cache_ && i < count_) ? &dk_cache_[i] : nullptr;
+        }
+
+        explicit operator bool() const { return key_data_ && dk_cache_ && count_ > 0 && key_len_ > 0; }
         [[nodiscard]] size_t count() const { return count_; }
+        [[nodiscard]] size_t key_len() const { return key_len_; }
     };
+
+    class Context {
+        std::unique_ptr<MBLOCK> master_;
+        std::unique_ptr<RoundKeySet> round_keys_;
+        size_t len_ = 0;
+
+    public:
+        Context(const MBLOCK *key, size_t len) : len_(len) {
+            if (!key || key->isNull() || len_ == 0) {
+                len_ = 0;
+                return;
+            }
+
+            if (key->getLen() == KEY_BLOCKS) {
+                round_keys_ = std::make_unique<RoundKeySet>(key, len_, NUM_ROUNDS, DOMAIN_ENC);
+            } else {
+                master_ = expand_key_to_wide(key);
+                if (!master_) {
+                    len_ = 0;
+                    return;
+                }
+                round_keys_ = std::make_unique<RoundKeySet>(master_.get(), len_, NUM_ROUNDS, DOMAIN_ENC);
+            }
+            if (!round_keys_ || !(*round_keys_)) {
+                round_keys_.reset();
+                len_ = 0;
+            }
+        }
+
+        [[nodiscard]] bool valid() const { return len_ > 0 && round_keys_ && static_cast<bool>(*round_keys_); }
+        [[nodiscard]] size_t len() const { return len_; }
+        [[nodiscard]] const RoundKeySet &keys() const { return *round_keys_; }
+    };
+
+    void ContextDeleter::operator()(Context *ctx) const {
+        delete ctx;
+    }
+
+    static inline void xor_with_cyclic_key(m_block *data, size_t len, const m_block *key, size_t key_len);
+    inline void encrypt_round(m_block *data, size_t len, const m_block *rk, size_t rk_len,
+                              const DerivedKeyCache &dk, size_t round);
+    inline void decrypt_round(m_block *data, size_t len, const m_block *rk, size_t rk_len,
+                              const DerivedKeyCache &dk, size_t round);
+
+    static MBLOCK *encrypt_with_keys(const MBLOCK *plaintext, const RoundKeySet &r_keys) {
+        if (!plaintext || plaintext->isNull()) return nullptr;
+        const size_t len = plaintext->getLen();
+        if (len == 0 || len != r_keys.key_len()) return nullptr;
+
+        std::unique_ptr<MBLOCK> ct(plaintext->clone());
+        if (!ct || ct->isNull()) return nullptr;
+
+        m_block *data = ct->getDataRef();
+        const m_block *rk0 = r_keys.key(0);
+        const m_block *rkN = r_keys.key(NUM_ROUNDS + 1);
+        const size_t rk_len = r_keys.key_len();
+        if (!rk0 || !rkN || rk_len == 0) return nullptr;
+
+        alignas(64) m_block seeds[OES_NUM_OF_BLOCKS];
+
+        xor_with_cyclic_key(data, len, rk0, rk_len);
+
+        for (size_t i = 0; i < OES_NUM_OF_BLOCKS; ++i) {
+            seeds[i] = rk0[i % rk_len] ^ DOMAIN_DIFF ^ RC[mod_rc(i)];
+        }
+        global_diffuse(data, len, seeds, OES_NUM_OF_BLOCKS);
+
+        for (size_t r = 0; r < NUM_ROUNDS; ++r) {
+            const DerivedKeyCache *dk = r_keys.derived(r + 1);
+            if (!dk) return nullptr;
+            encrypt_round(data, len, r_keys.key(r + 1), rk_len, *dk, r);
+        }
+
+        for (size_t i = 0; i < OES_NUM_OF_BLOCKS; ++i) {
+            seeds[i] = rkN[i % rk_len] ^ DOMAIN_DIFF ^ PHI ^ RC[mod_rc(i)];
+        }
+        global_diffuse(data, len, seeds, OES_NUM_OF_BLOCKS);
+
+        xor_with_cyclic_key(data, len, rkN, rk_len);
+        return ct.release();
+    }
+
+    static MBLOCK *decrypt_with_keys(const MBLOCK *ciphertext, const RoundKeySet &r_keys) {
+        if (!ciphertext || ciphertext->isNull()) return nullptr;
+        const size_t len = ciphertext->getLen();
+        if (len == 0 || len != r_keys.key_len()) return nullptr;
+
+        std::unique_ptr<MBLOCK> pt(ciphertext->clone());
+        if (!pt || pt->isNull()) return nullptr;
+
+        m_block *data = pt->getDataRef();
+        const m_block *rk0 = r_keys.key(0);
+        const m_block *rkN = r_keys.key(NUM_ROUNDS + 1);
+        const size_t rk_len = r_keys.key_len();
+        if (!rk0 || !rkN || rk_len == 0) return nullptr;
+
+        alignas(64) m_block seeds[OES_NUM_OF_BLOCKS];
+
+        xor_with_cyclic_key(data, len, rkN, rk_len);
+
+        for (size_t i = 0; i < OES_NUM_OF_BLOCKS; ++i) {
+            seeds[i] = rkN[i % rk_len] ^ DOMAIN_DIFF ^ PHI ^ RC[mod_rc(i)];
+        }
+        global_diffuse_inv(data, len, seeds, OES_NUM_OF_BLOCKS);
+
+        for (size_t r = NUM_ROUNDS; r-- > 0;) {
+            const DerivedKeyCache *dk = r_keys.derived(r + 1);
+            if (!dk) return nullptr;
+            decrypt_round(data, len, r_keys.key(r + 1), rk_len, *dk, r);
+        }
+
+        for (size_t i = 0; i < OES_NUM_OF_BLOCKS; ++i) {
+            seeds[i] = rk0[i % rk_len] ^ DOMAIN_DIFF ^ RC[mod_rc(i)];
+        }
+        global_diffuse_inv(data, len, seeds, OES_NUM_OF_BLOCKS);
+
+        xor_with_cyclic_key(data, len, rk0, rk_len);
+        return pt.release();
+    }
 
     // ============================================================================
     // ALGEBRAIC S-BOX (8-round, key-dependent)
     // ============================================================================
+
+    static inline size_t inc_block_idx(size_t idx) {
+        if constexpr (BLOCKS_POW2) {
+            return (idx + 1) & BLOCK_MASK;
+        }
+        ++idx;
+        return (idx == OES_NUM_OF_BLOCKS) ? 0 : idx;
+    }
 
     /**
      * Forward algebraic S-box transformation
@@ -871,47 +1102,69 @@ namespace SPHINX {
      * @param idx Block index for key selection
      * @return Transformed block
      */
-    static inline m_block sbox_forward(m_block x, const DerivedKeyCache &dk, size_t idx) {
+    static inline m_block sbox_forward(m_block x, const DerivedKeyCache &dk, size_t idx_mod) {
         constexpr size_t n = OES_NUM_OF_BLOCKS;
-        auto rk = [&](size_t off) { return dk.rk[(idx + off) % n]; };
+        const size_t i0 = idx_mod;
+        const size_t i1 = add_blocks(i0, 1);
+        const size_t i2 = add_blocks(i0, 2);
+        const size_t i3 = add_blocks(i0, 3);
+        const size_t i4 = add_blocks(i0, 4);
+        const size_t i5 = add_blocks(i0, 5);
+        const size_t i6 = add_blocks(i0, 6);
+        const size_t i7 = add_blocks(i0, 7 % n);
+        const size_t iHalf = add_blocks(i0, n / 2);
+        const size_t iLast = add_blocks(i0, (n > 1) ? (n - 1) : 0);
+        const size_t iLast2 = add_blocks(i0, (n > 2) ? (n - 2) : 0);
+
+        const m_block rk0 = dk.rk[i0];
+        const m_block rk1 = dk.rk[i1];
+        const m_block rk2 = dk.rk[i2];
+        const m_block rk3 = dk.rk[i3];
+        const m_block rk4 = dk.rk[i4];
+        const m_block rk5 = dk.rk[i5];
+        const m_block rk6 = dk.rk[i6];
+        const m_block rk7 = dk.rk[i7];
+        const m_block rkHalf = dk.rk[iHalf];
+        const m_block rkLast = dk.rk[iLast];
+        const m_block rkLast2 = dk.rk[iLast2];
 
         // Round 1-3: Initial mixing
-        x ^= rk(0);
-        x *= (rk(1) | 1);
+        x ^= rk0;
+        x *= (rk1 | 1);
         x = mBlock::rotl(x, ROT[0]);
-        x ^= rk(2);
+        x ^= rk2;
         x = mBlock::rotr(x, ROT[1]);
         x *= (PHI | 1);
-        x ^= mBlock::rotl(rk(3), ROT[2]);
+        x ^= mBlock::rotl(rk3, ROT[2]);
 
         // Round 4-7: Deep mixing
-        x *= (rk(4) | 1);
+        x *= (rk4 | 1);
         x = mBlock::rotl(x, ROT[3]);
-        x ^= rk(5);
+        x ^= rk5;
         x *= (SQRT3 | 1);
         x = mBlock::rotr(x, ROT[4]);
-        x ^= mBlock::rotr(rk(6), ROT[5]);
-        x *= (rk(7 % n) | 1);
+        x ^= mBlock::rotr(rk6, ROT[5]);
+        x *= (rk7 | 1);
         x = mBlock::rotl(x, ROT[6]);
 
         // Round 8: Parity mixing
         x ^= dk.parity;
         x *= (SQRT5 | 1);
         x = mBlock::rotr(x, ROT[7]);
-        x ^= mBlock::rotl(rk(n / 2), ROT[0]);
-        x *= ((rk(2) ^ rk(6 % n)) | 1);
+        x ^= mBlock::rotl(rkHalf, ROT[0]);
+        x *= ((rk2 ^ rk6) | 1);
         x = mBlock::rotl(x, ROT[1]);
-        x ^= rk(3) ^ rk(7 % n);
+        x ^= rk3 ^ rk7;
         x *= (PI_CONST | 1);
 
         // Final rounds: Maximum diffusion
         x = mBlock::rotr(x, ROT[2]);
-        x ^= mBlock::rotl(dk.parity ^ rk(0), ROT[3]);
+        x ^= mBlock::rotl(dk.parity ^ rk0, ROT[3]);
         x *= (E_CONST | 1);
         x = mBlock::rotl(x, ROT[4]);
-        x ^= mBlock::rotr(rk((n > 1) ? n - 1 : 0), ROT[5]);
-        x *= (rk(0) | 1);
-        x ^= rk(1) ^ rk((n > 2) ? n - 2 : 0);
+        x ^= mBlock::rotr(rkLast, ROT[5]);
+        x *= (rk0 | 1);
+        x ^= rk1 ^ rkLast2;
 
         return x;
     }
@@ -925,50 +1178,75 @@ namespace SPHINX {
      * @param idx Block index for key selection
      * @return Transformed block
      */
-    static inline m_block sbox_inverse(m_block x, const DerivedKeyCache &dk, size_t idx) {
+    static inline m_block sbox_inverse(m_block x, const DerivedKeyCache &dk, size_t idx_mod) {
         constexpr size_t n = OES_NUM_OF_BLOCKS;
-        auto rk = [&](size_t off) { return dk.rk[(idx + off) % n]; };
-        auto inv = [&](size_t off) { return dk.inv_rk[(idx + off) % n]; };
+        const size_t k = idx_mod;
+        const size_t i0 = k;
+        const size_t i1 = add_blocks(k, 1);
+        const size_t i2 = add_blocks(k, 2);
+        const size_t i3 = add_blocks(k, 3);
+        const size_t i4 = add_blocks(k, 4);
+        const size_t i5 = add_blocks(k, 5);
+        const size_t i6 = add_blocks(k, 6);
+        const size_t i7 = add_blocks(k, 7 % n);
+        const size_t iHalf = add_blocks(k, n / 2);
+        const size_t iLast = add_blocks(k, (n > 1) ? (n - 1) : 0);
+        const size_t iLast2 = add_blocks(k, (n > 2) ? (n - 2) : 0);
 
         // Reverse final rounds
-        x ^= rk(1) ^ rk((n > 2) ? n - 2 : 0);
-        x *= inv(0);
-        x ^= mBlock::rotr(rk((n > 1) ? n - 1 : 0), ROT[5]);
+        x ^= dk.rk[i1] ^ dk.rk[iLast2];
+        x *= dk.inv_rk[i0];
+        x ^= mBlock::rotr(dk.rk[iLast], ROT[5]);
         x = mBlock::rotr(x, ROT[4]);
         x *= INV_E;
-        x ^= mBlock::rotl(dk.parity ^ rk(0), ROT[3]);
+        x ^= mBlock::rotl(dk.parity ^ dk.rk[i0], ROT[3]);
         x = mBlock::rotl(x, ROT[2]);
 
         // Reverse round 8
         x *= INV_PI;
-        x ^= rk(3) ^ rk(7 % n);
+        x ^= dk.rk[i3] ^ dk.rk[i7];
         x = mBlock::rotr(x, ROT[1]);
-        x *= compute_mod_inverse((rk(2) ^ rk(6 % n)) | 1);
-        x ^= mBlock::rotl(rk(n / 2), ROT[0]);
+        x *= dk.inv_mix_2_6[k];
+        x ^= mBlock::rotl(dk.rk[iHalf], ROT[0]);
         x = mBlock::rotl(x, ROT[7]);
         x *= INV_SQRT5;
         x ^= dk.parity;
 
         // Reverse rounds 4-7
         x = mBlock::rotr(x, ROT[6]);
-        x *= compute_mod_inverse(rk(7 % n) | 1);
-        x ^= mBlock::rotr(rk(6), ROT[5]);
+        x *= dk.inv_rk7[k];
+        x ^= mBlock::rotr(dk.rk[i6], ROT[5]);
         x = mBlock::rotl(x, ROT[4]);
         x *= INV_SQRT3;
-        x ^= rk(5);
+        x ^= dk.rk[i5];
         x = mBlock::rotr(x, ROT[3]);
-        x *= inv(4);
+        x *= dk.inv_rk[i4];
 
         // Reverse rounds 1-3
-        x ^= mBlock::rotl(rk(3), ROT[2]);
+        x ^= mBlock::rotl(dk.rk[i3], ROT[2]);
         x *= INV_PHI;
         x = mBlock::rotl(x, ROT[1]);
-        x ^= rk(2);
+        x ^= dk.rk[i2];
         x = mBlock::rotr(x, ROT[0]);
-        x *= inv(1);
-        x ^= rk(0);
+        x *= dk.inv_rk[i1];
+        x ^= dk.rk[i0];
 
         return x;
+    }
+
+    static inline void xor_with_cyclic_key(m_block *data, size_t len, const m_block *key, size_t key_len) {
+        if (!data || !key || key_len == 0 || len == 0) return;
+        if (key_len == len) {
+            for (size_t i = 0; i < len; ++i) {
+                data[i] ^= key[i];
+            }
+            return;
+        }
+        size_t k = 0;
+        for (size_t i = 0; i < len; ++i) {
+            data[i] ^= key[k];
+            if (++k == key_len) k = 0;
+        }
     }
 
     /**
@@ -1056,9 +1334,17 @@ namespace SPHINX {
         // Cross-group mixing (column-like mixing)
         if (len >= 8 && groups >= 2) {
             for (size_t c = 0; c < groups && c < 4; ++c) {
-                const size_t i0 = c, i1 = (c + 1) % groups + groups;
-                const size_t i2 = (c + 2) % groups + 2 * groups;
-                const size_t i3 = (c + 3) % groups + 3 * groups;
+                size_t c1 = c + 1;
+                size_t c2 = c + 2;
+                size_t c3 = c + 3;
+                if (c1 >= groups) c1 -= groups;
+                if (c2 >= groups) c2 -= groups;
+                if (c3 >= groups) c3 -= groups;
+                if (c3 >= groups) c3 -= groups;
+                const size_t i0 = c;
+                const size_t i1 = c1 + groups;
+                const size_t i2 = c2 + 2 * groups;
+                const size_t i3 = c3 + 3 * groups;
                 if (i3 < len) quarter_round_fwd(d[i0], d[i1], d[i2], d[i3]);
             }
         }
@@ -1107,9 +1393,17 @@ namespace SPHINX {
         // Reverse cross-group mixing
         if (len >= 8 && groups >= 2) {
             for (size_t c = (groups < 4 ? groups : 4); c-- > 0;) {
-                const size_t i0 = c, i1 = (c + 1) % groups + groups;
-                const size_t i2 = (c + 2) % groups + 2 * groups;
-                const size_t i3 = (c + 3) % groups + 3 * groups;
+                size_t c1 = c + 1;
+                size_t c2 = c + 2;
+                size_t c3 = c + 3;
+                if (c1 >= groups) c1 -= groups;
+                if (c2 >= groups) c2 -= groups;
+                if (c3 >= groups) c3 -= groups;
+                if (c3 >= groups) c3 -= groups;
+                const size_t i0 = c;
+                const size_t i1 = c1 + groups;
+                const size_t i2 = c2 + 2 * groups;
+                const size_t i3 = c3 + 3 * groups;
                 if (i3 < len) quarter_round_inv(d[i0], d[i1], d[i2], d[i3]);
             }
         }
@@ -1130,29 +1424,23 @@ namespace SPHINX {
      * @param round_key Key material for this round
      * @param round Round number (for round constants)
      */
-    inline void encrypt_round(m_block *data, size_t len, MBLOCK *round_key, size_t round) {
-        if (!data || !round_key || len == 0) return;
+    inline void encrypt_round(m_block *data, size_t len, const m_block *rk, size_t rk_len,
+                              const DerivedKeyCache &dk, size_t round) {
+        if (!data || !rk || len == 0 || rk_len == 0) return;
 
-        const m_block rc = RC[round % NUM_RC];
-        const m_block *rk = round_key->getDataRef();
-        const size_t rk_len = round_key->getLen();
-        if (!rk || rk_len == 0) return;
-
-        // Derive keys for S-box operations
-        DerivedKeyCache dk{};
-        dk.derive(rk, std::min(rk_len, static_cast<size_t>(OES_NUM_OF_BLOCKS)));
+        const m_block rc = RC[mod_rc(round)];
 
         // 1. Key addition layer
-        for (size_t i = 0; i < len; ++i) {
-            data[i] ^= rk[i % rk_len];
-        }
+        xor_with_cyclic_key(data, len, rk, rk_len);
 
         // 2. Wide S-box layer (cross-block non-linearity)
         wide_sbox_layer(data, len, dk, false);
 
         // 3. Algebraic S-box layer (per-block non-linearity)
+        size_t k = 0;
         for (size_t i = 0; i < len; ++i) {
-            data[i] = sbox_forward(data[i], dk, i);
+            data[i] = sbox_forward(data[i], dk, k);
+            k = inc_block_idx(k);
         }
 
         // 4. Diffusion layer (linear mixing)
@@ -1178,13 +1466,11 @@ namespace SPHINX {
      * @param round_key Key material for this round (same as encryption)
      * @param round Round number (for round constants)
      */
-    inline void decrypt_round(m_block *data, size_t len, MBLOCK *round_key, size_t round) {
-        if (!data || !round_key || len == 0) return;
+    inline void decrypt_round(m_block *data, size_t len, const m_block *rk, size_t rk_len,
+                              const DerivedKeyCache &dk, size_t round) {
+        if (!data || !rk || len == 0 || rk_len == 0) return;
 
-        const m_block rc = RC[round % NUM_RC];
-        const m_block *rk = round_key->getDataRef();
-        const size_t rk_len = round_key->getLen();
-        if (!rk || rk_len == 0) return;
+        const m_block rc = RC[mod_rc(round)];
 
         // 1. Remove round constants
         data[0] ^= rc;
@@ -1199,22 +1485,18 @@ namespace SPHINX {
         // 3. Inverse diffusion layer
         diffusion_inverse(data, len);
 
-        // Derive keys for S-box operations
-        DerivedKeyCache dk{};
-        dk.derive(rk, std::min(rk_len, static_cast<size_t>(OES_NUM_OF_BLOCKS)));
-
         // 4. Inverse algebraic S-box layer
+        size_t k = 0;
         for (size_t i = 0; i < len; ++i) {
-            data[i] = sbox_inverse(data[i], dk, i);
+            data[i] = sbox_inverse(data[i], dk, k);
+            k = inc_block_idx(k);
         }
 
         // 5. Inverse wide S-box layer
         wide_sbox_layer(data, len, dk, true);
 
         // 6. Remove key addition
-        for (size_t i = 0; i < len; ++i) {
-            data[i] ^= rk[i % rk_len];
-        }
+        xor_with_cyclic_key(data, len, rk, rk_len);
     }
 
     /**
@@ -1234,56 +1516,34 @@ namespace SPHINX {
      * @param key Encryption key
      * @return Ciphertext blocks, or nullptr on error
      */
+    ContextPtr create_context(const MBLOCK *key, size_t len) {
+        ContextPtr ctx(new Context(key, len));
+        if (!ctx || !ctx->valid()) {
+            return nullptr;
+        }
+        return ctx;
+    }
+
+    MBLOCK *encrypt_with_context(const MBLOCK *plaintext, const Context &ctx) {
+        if (!ctx.valid()) return nullptr;
+        if (!plaintext || plaintext->isNull() || plaintext->getLen() != ctx.len()) return nullptr;
+        return encrypt_with_keys(plaintext, ctx.keys());
+    }
+
+    MBLOCK *decrypt_with_context(const MBLOCK *ciphertext, const Context &ctx) {
+        if (!ctx.valid()) return nullptr;
+        if (!ciphertext || ciphertext->isNull() || ciphertext->getLen() != ctx.len()) return nullptr;
+        return decrypt_with_keys(ciphertext, ctx.keys());
+    }
+
     MBLOCK *encrypt(const MBLOCK *plaintext, const MBLOCK *key) {
         if (!plaintext || plaintext->isNull() || !key || key->isNull()) return nullptr;
-
         const size_t len = plaintext->getLen();
         if (len == 0) return nullptr;
 
-        // Expand key to match wide-block configuration
-        const auto master = expand_key_to_wide(key);
-        if (!master) return nullptr;
-
-        // Clone plaintext to ciphertext buffer
-        std::unique_ptr<MBLOCK> ct(plaintext->clone());
-        if (!ct || ct->isNull()) return nullptr;
-
-        // Generate all round keys
-        RoundKeySet r_keys(master.get(), len, NUM_ROUNDS, DOMAIN_ENC);
-        if (!r_keys) return nullptr;
-
-        m_block *data = ct->getDataRef();
-        const m_block *rk0 = r_keys[0]->getDataRef();
-        const m_block *rkN = r_keys[NUM_ROUNDS + 1]->getDataRef();
-        const size_t rk0_len = r_keys[0]->getLen();
-        const size_t rkN_len = r_keys[NUM_ROUNDS + 1]->getLen();
-
-        m_block seeds[OES_NUM_OF_BLOCKS];
-
-        // Initial whitening
-        for (size_t i = 0; i < len; ++i) data[i] ^= rk0[i % rk0_len];
-
-        // Initial global diffusion
-        for (size_t i = 0; i < OES_NUM_OF_BLOCKS; ++i) {
-            seeds[i] = rk0[i % rk0_len] ^ DOMAIN_DIFF ^ RC[i % NUM_RC];
-        }
-        global_diffuse(data, len, seeds, OES_NUM_OF_BLOCKS);
-
-        // Main rounds
-        for (size_t r = 0; r < NUM_ROUNDS; ++r) {
-            encrypt_round(data, len, r_keys[r + 1], r);
-        }
-
-        // Final global diffusion
-        for (size_t i = 0; i < OES_NUM_OF_BLOCKS; ++i) {
-            seeds[i] = rkN[i % rkN_len] ^ DOMAIN_DIFF ^ PHI ^ RC[i % NUM_RC];
-        }
-        global_diffuse(data, len, seeds, OES_NUM_OF_BLOCKS);
-
-        // Final whitening
-        for (size_t i = 0; i < len; ++i) data[i] ^= rkN[i % rkN_len];
-
-        return ct.release();
+        auto ctx = create_context(key, len);
+        if (!ctx) return nullptr;
+        return encrypt_with_context(plaintext, *ctx);
     }
 
     /**
@@ -1305,53 +1565,11 @@ namespace SPHINX {
      */
     MBLOCK *decrypt(const MBLOCK *ciphertext, const MBLOCK *key) {
         if (!ciphertext || ciphertext->isNull() || !key || key->isNull()) return nullptr;
-
         const size_t len = ciphertext->getLen();
         if (len == 0) return nullptr;
 
-        // Expand key to match wide-block configuration
-        const auto master = expand_key_to_wide(key);
-        if (!master) return nullptr;
-
-        // Clone ciphertext to plaintext buffer
-        std::unique_ptr<MBLOCK> pt(ciphertext->clone());
-        if (!pt || pt->isNull()) return nullptr;
-
-        // Generate all round keys (same as encryption)
-        RoundKeySet r_keys(master.get(), len, NUM_ROUNDS, DOMAIN_ENC);
-        if (!r_keys) return nullptr;
-
-        m_block *data = pt->getDataRef();
-        const m_block *rk0 = r_keys[0]->getDataRef();
-        const m_block *rkN = r_keys[NUM_ROUNDS + 1]->getDataRef();
-        const size_t rk0_len = r_keys[0]->getLen();
-        const size_t rkN_len = r_keys[NUM_ROUNDS + 1]->getLen();
-
-        m_block seeds[OES_NUM_OF_BLOCKS];
-
-        // Remove final whitening
-        for (size_t i = 0; i < len; ++i) data[i] ^= rkN[i % rkN_len];
-
-        // Inverse final diffusion
-        for (size_t i = 0; i < OES_NUM_OF_BLOCKS; ++i) {
-            seeds[i] = rkN[i % rkN_len] ^ DOMAIN_DIFF ^ PHI ^ RC[i % NUM_RC];
-        }
-        global_diffuse_inv(data, len, seeds, OES_NUM_OF_BLOCKS);
-
-        // Inverse main rounds (in reverse order)
-        for (size_t r = NUM_ROUNDS; r-- > 0;) {
-            decrypt_round(data, len, r_keys[r + 1], r);
-        }
-
-        // Inverse initial diffusion
-        for (size_t i = 0; i < OES_NUM_OF_BLOCKS; ++i) {
-            seeds[i] = rk0[i % rk0_len] ^ DOMAIN_DIFF ^ RC[i % NUM_RC];
-        }
-        global_diffuse_inv(data, len, seeds, OES_NUM_OF_BLOCKS);
-
-        // Remove initial whitening
-        for (size_t i = 0; i < len; ++i) data[i] ^= rk0[i % rk0_len];
-
-        return pt.release();
+        auto ctx = create_context(key, len);
+        if (!ctx) return nullptr;
+        return decrypt_with_context(ciphertext, *ctx);
     }
 } // namespace SPHINX

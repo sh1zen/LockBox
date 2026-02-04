@@ -3,5 +3,6 @@
 .ps1
 
 cmake-build-release
+cmake-build-opt
 cmake-build-debug
 cmake-build-test

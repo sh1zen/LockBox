@@ -34,6 +34,9 @@ iNode::iNode(const std::string &path, OES *engine)
 }
 
 iNode::~iNode() {
+    while (bulkDepth_ > 0) {
+        endBulkUpdate();
+    }
     storage_.sync();
     storage_.close();
 }
@@ -57,37 +60,81 @@ void iNode::syncRoot() const {
 
 void iNode::commitRoot() const {
     storage_.writeBlock(root_->current, root_.get());
+    if (bulkDepth_ > 0) {
+        pendingSync_ = true;
+        return;
+    }
     storage_.sync();
 }
 
 void iNode::sync() const {
+    if (bulkDepth_ > 0) {
+        pendingSync_ = true;
+        return;
+    }
     storage_.sync();
     syncRoot();
+}
+
+void iNode::beginBulkUpdate() const {
+    ++bulkDepth_;
+}
+
+void iNode::endBulkUpdate() const {
+    if (bulkDepth_ == 0) return;
+    --bulkDepth_;
+    if (bulkDepth_ > 0) return;
+
+    if (!pendingLogEntries_.empty()) {
+        appendLogEntries(pendingLogEntries_);
+        pendingLogEntries_.clear();
+    }
+
+    if (pendingSync_) {
+        storage_.sync();
+        syncRoot();
+        pendingSync_ = false;
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ENCRYPTION
 // ═══════════════════════════════════════════════════════════════════════════
-
 std::pair<char *, size_t> iNode::encryptData(const char *data, size_t size) const {
+    // File vuoto: restituisci nullptr ma con successo
     if (!data || size == 0) return {nullptr, 0};
+
+    // Nessun cipher: copia in chiaro
     if (!cipher_) {
         auto *copy = static_cast<char *>(malloc(size));
         if (copy) memcpy(copy, data, size);
         return {copy, size};
     }
+
     try {
-        cipher_->resetBlocks();
+        // load_data_raw already cleans up existing blocks — no need for resetBlocks()
         cipher_->load_data_raw(const_cast<char *>(data), size);
         cipher_->enc_adv();
-        auto *cb = cipher_->get_cipherBlock();
-        if (!cb || cb->isNull()) goto fallback;
-        auto [exp, len] = exportBlock(cb, OES_TYPE_RAW_UINT8);
-        if (!exp || len == 0) goto fallback;
+
+        // get_cipher_data_raw() reads cipherBlock directly without cloning,
+        // avoiding an unnecessary MBLOCK allocation + copy.
+        auto [exp, len] = cipher_->get_cipher_data_raw();
+        if (!exp || len == 0) {
+            std::cerr << "[WARN] Encryption produced null/empty output for "
+                    << size << " bytes, using fallback\n";
+            goto fallback;
+        }
+
         return {static_cast<char *>(exp), len};
+    } catch (const std::exception &e) {
+        std::cerr << "[ERROR] Encryption exception for " << size << " bytes: " << e.what() << "\n";
     } catch (...) {
+        std::cerr << "[ERROR] Unknown encryption exception for " << size << " bytes\n";
     }
+
 fallback:
+    // Fallback: copia senza cifrare (ATTENZIONE: dati non cifrati!)
+    std::cerr << "[WARN] Storing " << size << " bytes UNENCRYPTED as fallback!\n";
     auto *copy = static_cast<char *>(malloc(size));
     if (copy) memcpy(copy, data, size);
     return {copy, size};
@@ -101,12 +148,11 @@ std::pair<char *, size_t> iNode::decryptData(const char *data, size_t size) cons
         return {copy, size};
     }
     try {
-        cipher_->resetBlocks();
+        // load_cipher_data_raw already cleans up existing blocks
         cipher_->load_cipher_data_raw(const_cast<char *>(data), size);
         cipher_->dec_adv();
-        auto *pb = cipher_->get_plainBlock();
-        if (!pb || pb->isNull()) goto fallback;
-        auto [exp, len] = exportBlock(pb, OES_TYPE_UINT8);
+        // get_data() reads plainBlock directly via toBytes() — no clone needed
+        auto [exp, len] = cipher_->get_data();
         if (!exp || len == 0) goto fallback;
         return {static_cast<char *>(exp), len};
     } catch (...) {
@@ -241,10 +287,15 @@ size_t iNode::ensureDirChain(const std::string &plainPath) const {
         newDir->setName(token);
         newDir->isFile = false;
         newDir->level = level;
-        newDir->parent = parent->current;
+        const size_t parentPos = (parent == root_.get()) ? 0 : parent->current;
+        newDir->parent = parentPos;
         newDir->setCreatedNow();
         newDir->setModifiedNow();
         newDir->current = insertBlock(newDir.get());
+
+        // insertBlock/allocate may remap storage; refresh parent pointer.
+        parent = parentPos ? blockAt(parentPos) : root_.get();
+        if (!parent) return 0;
 
         if (parent->subdir_pos == 0) {
             parent->subdir_pos = newDir->current;
@@ -268,10 +319,19 @@ size_t iNode::ensureDirChain(const std::string &plainPath) const {
         level++;
         start = end + 1;
     }
-    sync();
     return parent->current;
 }
 
+/**
+ * Create file block in parent directory
+ * Handles both empty and non-empty files
+ *
+ * @param plainName File name (not full path)
+ * @param encData Encrypted data (can be nullptr for empty files)
+ * @param encSize Encrypted data size (can be 0 for empty files)
+ * @param parentPos Parent directory position (0 for root)
+ * @return Position of new file block, 0 on error
+ */
 size_t iNode::createFileBlock(const std::string &plainName, const char *encData,
                               size_t encSize, size_t parentPos) const {
     Block *parent = parentPos ? blockAt(parentPos) : root_.get();
@@ -287,14 +347,29 @@ size_t iNode::createFileBlock(const std::string &plainName, const char *encData,
     fb->setCreatedNow();
     fb->setModifiedNow();
 
+    // Alloca spazio dati solo se ci sono dati
     if (encData && encSize > 0) {
         fb->data_pos = storage_.allocate(encSize);
-        if (fb->data_pos == inode_raw::NPOS) return 0;
-        storage_.write(fb->data_pos, encData, encSize);
+        if (fb->data_pos == inode_raw::NPOS) {
+            return 0;
+        }
+        if (!storage_.write(fb->data_pos, encData, encSize)) {
+            return 0;
+        }
+    } else {
+        fb->data_pos = 0; // File vuoto
     }
-    fb->current = insertBlock(fb.get());
-    if (fb->current == 0) return 0;
 
+    fb->current = insertBlock(fb.get());
+    if (fb->current == 0) {
+        return 0;
+    }
+
+    // insertBlock/allocate may remap storage; refresh parent pointer.
+    parent = parentPos ? blockAt(parentPos) : root_.get();
+    if (!parent || parent->isFile) return 0;
+
+    // Aggiungi alla lista file del parent
     if (parent->data_pos == 0) {
         parent->data_pos = fb->current;
     } else {
@@ -307,13 +382,13 @@ size_t iNode::createFileBlock(const std::string &plainName, const char *encData,
             updateBlock(fb.get());
         }
     }
+
     parent->files_n++;
     parent->setModifiedNow();
 
     if (parentPos == 0) commitRoot();
     else updateBlock(parent);
 
-    sync();
     return fb->current;
 }
 
@@ -341,6 +416,40 @@ std::pair<std::unique_ptr<char[]>, size_t> iNode::readFileData(Block *block) con
 // LOGGING
 // ═══════════════════════════════════════════════════════════════════════════
 
+void iNode::appendLogEntries(const std::string &entries) const {
+    if (entries.empty()) return;
+
+    if (auto *logBlock = findBlock(LOG_INTERNAL_PATH, true)) {
+        const size_t logPos = logBlock->current;
+        auto [existing, existingSize] = readFileData(logBlock);
+        std::string fullLog;
+        if (existing && existingSize > 0)
+            fullLog = std::string(existing.get(), existingSize);
+        fullLog += entries;
+
+        auto [encData, encSize] = encryptData(fullLog.c_str(), fullLog.size());
+        size_t newPos = storage_.reallocate(logBlock->data_pos, logBlock->size, encSize);
+        if (newPos != inode_raw::NPOS) {
+            logBlock = blockAt(logPos);
+            if (!logBlock) {
+                free(encData);
+                pendingSync_ = true;
+                return;
+            }
+            storage_.write(newPos, encData, encSize);
+            logBlock->data_pos = newPos;
+            logBlock->size = encSize;
+            logBlock->setModifiedNow();
+            updateBlock(logBlock);
+        }
+        free(encData);
+    } else {
+        auto [encData, encSize] = encryptData(entries.c_str(), entries.size());
+        createFileBlock(LOG_INTERNAL_PATH, encData, encSize, 0);
+        free(encData);
+    }
+}
+
 void iNode::logOperation(const std::string &op, const std::string &details) const {
     auto now = std::chrono::system_clock::now();
     auto t = std::chrono::system_clock::to_time_t(now);
@@ -351,28 +460,12 @@ void iNode::logOperation(const std::string &op, const std::string &details) cons
     if (!details.empty()) entry += ": " + details;
     entry += "\n";
 
-    if (auto *logBlock = findBlock(LOG_INTERNAL_PATH, true)) {
-        auto [existing, existingSize] = readFileData(logBlock);
-        std::string fullLog;
-        if (existing && existingSize > 0)
-            fullLog = std::string(existing.get(), existingSize);
-        fullLog += entry;
-
-        auto [encData, encSize] = encryptData(fullLog.c_str(), fullLog.size());
-        size_t newPos = storage_.reallocate(logBlock->data_pos, logBlock->size, encSize);
-        if (newPos != inode_raw::NPOS) {
-            storage_.write(newPos, encData, encSize);
-            logBlock->data_pos = newPos;
-            logBlock->size = encSize;
-            logBlock->setModifiedNow();
-            updateBlock(logBlock);
-        }
-        free(encData);
-    } else {
-        auto [encData, encSize] = encryptData(entry.c_str(), entry.size());
-        createFileBlock(LOG_INTERNAL_PATH, encData, encSize, 0);
-        free(encData);
+    if (bulkDepth_ > 0) {
+        pendingLogEntries_ += entry;
+        return;
     }
+
+    appendLogEntries(entry);
     sync();
 }
 
@@ -385,13 +478,21 @@ std::string iNode::getLog() const {
 }
 
 void iNode::clearLog() {
+    pendingLogEntries_.clear();
     auto *logBlock = findBlock(LOG_INTERNAL_PATH, true);
     if (!logBlock) return;
+    const size_t logPos = logBlock->current;
 
     std::string empty = "[Log cleared]\n";
     auto [encData, encSize] = encryptData(empty.c_str(), empty.size());
     size_t newPos = storage_.reallocate(logBlock->data_pos, logBlock->size, encSize);
     if (newPos != inode_raw::NPOS) {
+        logBlock = blockAt(logPos);
+        if (!logBlock) {
+            free(encData);
+            sync();
+            return;
+        }
         storage_.write(newPos, encData, encSize);
         logBlock->data_pos = newPos;
         logBlock->size = encSize;
@@ -411,29 +512,122 @@ size_t iNode::getLogSize() const {
 // PUBLIC API
 // ═══════════════════════════════════════════════════════════════════════════
 
+/**
+ * Add file or overwrite if exists
+ * If file with same name exists, it will be updated with new content
+ *
+ * @param plainPath Path to file
+ * @param data File content (can be nullptr for empty files)
+ * @param size Size in bytes (can be 0 for empty files)
+ * @return Position of file block, 0 on error
+ */
 size_t iNode::addFile(const std::string &plainPath, const char *data, size_t size) {
-    if (!data || size == 0) return 0;
-    if (exists(plainPath, true)) return 0;
+    // Permetti file vuoti (data può essere nullptr se size == 0)
+    if (size > 0 && !data) return 0;
 
     std::string norm = normalizePath(plainPath);
+    if (norm.empty()) return 0;
+
+    // Se il file esiste già, aggiorna il contenuto (overwrite)
+    if (auto *existing = findBlock(plainPath, true)) {
+        const size_t existingPos = existing->current;
+        if (size == 0) {
+            // File vuoto: azzera i dati
+            existing->size = 0;
+            existing->data_pos = 0;
+            existing->setModifiedNow();
+            updateBlock(existing);
+            sync();
+            logOperation("UPDATE_FILE", plainPath + " (0 bytes, overwrite)");
+            return existing->current;
+        }
+
+        // Cifra i nuovi dati
+        auto [encData, encSize] = encryptData(data, size);
+        if (!encData || encSize == 0) {
+            return 0;
+        }
+
+        // Rialloca spazio se necessario
+        size_t newPos = storage_.reallocate(existing->data_pos, existing->size, encSize);
+        if (newPos == inode_raw::NPOS) {
+            free(encData);
+            return 0;
+        }
+
+        existing = blockAt(existingPos);
+        if (!existing) {
+            free(encData);
+            return 0;
+        }
+
+        storage_.write(newPos, encData, encSize);
+        existing->data_pos = newPos;
+        existing->size = encSize;
+        existing->setModifiedNow();
+        updateBlock(existing);
+        free(encData);
+
+        sync();
+        logOperation("UPDATE_FILE", plainPath + " (" + std::to_string(size) + " bytes, overwrite)");
+        return existing->current;
+    }
+
+    // File non esiste, crealo
     size_t lastSlash = norm.rfind('/');
     std::string dirPath = (lastSlash == std::string::npos) ? "" : norm.substr(0, lastSlash);
     std::string fileName = (lastSlash == std::string::npos) ? norm : norm.substr(lastSlash + 1);
 
+    // Assicura che la directory parent esista
     size_t parentPos = dirPath.empty() ? 0 : ensureDirChain(dirPath);
 
+    // Gestisci file vuoti
+    if (size == 0) {
+        size_t pos = createFileBlock(fileName, nullptr, 0, parentPos);
+        if (pos > 0) {
+            logOperation("ADD_FILE", plainPath + " (0 bytes)");
+        }
+        return pos;
+    }
+
+    // Cifra e crea il file
     auto [encData, encSize] = encryptData(data, size);
+    if (!encData || encSize == 0) {
+        return 0;
+    }
+
     size_t pos = createFileBlock(fileName, encData, encSize, parentPos);
     free(encData);
 
-    if (pos > 0) logOperation("ADD_FILE", plainPath + " (" + std::to_string(size) + " bytes)");
+    if (pos > 0) {
+        logOperation("ADD_FILE", plainPath + " (" + std::to_string(size) + " bytes)");
+    }
     return pos;
 }
 
+/**
+ * Add or get existing directory
+ * Returns position of directory (existing or newly created)
+ *
+ * @param plainPath Path to directory
+ * @return Position of directory block, 0 on error
+ */
 size_t iNode::addDirectory(const std::string &plainPath) const {
-    if (exists(plainPath, false)) return 0;
-    size_t result = ensureDirChain(normalizePath(plainPath));
-    if (result > 0) logOperation("ADD_DIR", plainPath);
+    std::string norm = normalizePath(plainPath);
+    if (norm.empty()) {
+        return root_->current; // Root directory
+    }
+
+    // Se esiste già, ritorna la sua posizione
+    if (auto *existing = findBlock(plainPath, false)) {
+        return existing->current;
+    }
+
+    // Crea la catena di directory
+    size_t result = ensureDirChain(norm);
+    if (result > 0) {
+        logOperation("ADD_DIR", plainPath);
+    }
     return result;
 }
 
@@ -550,17 +744,23 @@ std::pair<char *, size_t> iNode::readFile(const std::string &plainPath) const {
     auto [data, size] = readFileData(block);
     if (!data) return {nullptr, 0};
 
-    logOperation("READ_FILE", plainPath);
     return {data.release(), size};
 }
 
 bool iNode::updateFile(const std::string &plainPath, const char *data, size_t size) const {
     auto *block = findBlock(plainPath, true);
     if (!block) return false;
+    const size_t blockPos = block->current;
 
     auto [encData, encSize] = encryptData(data, size);
     size_t newPos = storage_.reallocate(block->data_pos, block->size, encSize);
     if (newPos == inode_raw::NPOS) {
+        free(encData);
+        return false;
+    }
+
+    block = blockAt(blockPos);
+    if (!block) {
         free(encData);
         return false;
     }
@@ -770,12 +970,25 @@ bool iNode::copyDirectoryRecursive(const std::string &srcPath, const std::string
     return true;
 }
 
+/**
+ * Import file from filesystem, overwriting if exists
+ *
+ * @param plainPath Internal path for the file
+ * @param externalPath Path to file on filesystem
+ * @return Position of file block, 0 on error
+ */
 size_t iNode::importFile(const std::string &plainPath, const std::string &externalPath) {
     std::ifstream file(externalPath, std::ios::binary | std::ios::ate);
     if (!file.is_open()) return 0;
 
     size_t fileSize = file.tellg();
-    if (fileSize == 0) return 0;
+
+    // Gestisci file vuoti
+    if (fileSize == 0) {
+        size_t result = addFile(plainPath, nullptr, 0);
+        if (result > 0) logOperation("IMPORT_FILE", externalPath + " -> " + plainPath + " (empty)");
+        return result;
+    }
 
     file.seekg(0);
     std::vector<char> buffer(fileSize);
@@ -811,7 +1024,6 @@ std::vector<iNode::DirEntry> iNode::listDirectory(const std::string &plainPath) 
             entries.push_back({b->getRawName(), name, true, b->size});
     }
 
-    const_cast<iNode *>(this)->logOperation("LIST_DIR", plainPath.empty() ? "/" : plainPath);
     return entries;
 }
 
@@ -827,7 +1039,6 @@ std::vector<std::string> iNode::search(const std::string &name, bool caseSensiti
             results.push_back(path);
     });
 
-    logOperation("SEARCH", name + " (found " + std::to_string(results.size()) + " results)");
     return results;
 }
 
@@ -996,6 +1207,9 @@ void iNode::display() const {
 // ═══════════════════════════════════════════════════════════════════════════
 
 void iNode::save() {
+    while (bulkDepth_ > 0) {
+        endBulkUpdate();
+    }
     commitRoot();
     logOperation("SAVE", "LockBox saved");
 }
@@ -1093,6 +1307,11 @@ std::unique_ptr<iNode> iNode::buildFromFilesystem(const std::string &fsPath,
 }
 
 void iNode::scanFilesystem(const std::string &fsPath, const std::string &internalPath) {
+    // Use bulk update to batch all I/O syncs into a single flush at the end.
+    // This avoids per-file msync() calls which dominate I/O cost.
+    const bool isTopLevel = (bulkDepth_ == 0);
+    if (isTopLevel) beginBulkUpdate();
+
     for (const auto &entry: Filesystem::listDirectory(fsPath)) {
         std::string fullPath = fsPath + "/" + entry.name;
         std::string newInternal = internalPath.empty()
@@ -1110,6 +1329,8 @@ void iNode::scanFilesystem(const std::string &fsPath, const std::string &interna
             }
         }
     }
+
+    if (isTopLevel) endBulkUpdate();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

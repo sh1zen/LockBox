@@ -2,11 +2,11 @@ cmake_minimum_required(VERSION 3.15)
 
 project(LockBox VERSION 1.0.0 LANGUAGES CXX)
 
-# Use C++23
+# ======================= C++ STANDARD =======================
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Optimizations
+# ======================= OPTIMIZATIONS =======================
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
 
 # Static linking (Windows-only recommended)
@@ -23,8 +23,6 @@ set(COMMON_SOURCES
         OpenES/layer/raw-layer.cpp
         OpenES/layer/interface.cpp
         OpenES/algo/block_ciphers.cpp
-        OpenES/support/big_int/big_int.cpp
-        OpenES/algo/asymmetric.cpp
         OpenES/algo/hashing.cpp
         OpenES/support/support.cpp
         OpenES/support/oes-exception.cpp
@@ -59,6 +57,13 @@ set(TEST_SOURCES
         test/prngtest.h
 )
 
+# ======================= WINDOWS RESOURCES =======================
+if (WIN32)
+    set(WIN_RESOURCES
+            resources/app.rc
+    )
+endif()
+
 # ======================= INCLUDE DIRECTORIES =======================
 include_directories(
         .
@@ -76,10 +81,16 @@ option(BUILD_TESTS "Build the test suite" OFF)
 
 # ======================= EXECUTABLES =======================
 if (BUILD_APP)
-    add_executable(LockBox ${COMMON_SOURCES} ${APP_SOURCES})
+    add_executable(LockBox
+            ${COMMON_SOURCES}
+            ${APP_SOURCES}
+            ${WIN_RESOURCES}
+    )
+
     target_compile_options(LockBox PRIVATE
             $<$<CONFIG:Release>:-O3 -march=native -funroll-loops>
     )
+
     if (WIN32)
         target_link_libraries(LockBox PRIVATE ws2_32)
     endif()
@@ -87,7 +98,12 @@ endif()
 
 if (BUILD_TESTS)
     add_compile_definitions(DEBUG=1)
-    add_executable(LockBoxTests ${COMMON_SOURCES} ${TEST_SOURCES})
+
+    add_executable(LockBoxTests
+            ${COMMON_SOURCES}
+            ${TEST_SOURCES}
+    )
+
     if (WIN32)
         target_link_libraries(LockBoxTests PRIVATE ws2_32)
     endif()

@@ -12,13 +12,16 @@ m_block prng_next(m_block *state) {
     m_block x = *state + PRNG_SEED;
 
     // 2. Fast mix dei bit vicini
-    x ^= mBlock::rotl(x, 1) ^ mBlock::rotl(x, 3) ^ (x >> 1);
+    const m_block xRot1 = mBlock::rotl(x, 1);
+    const m_block xRot3 = mBlock::rotl(x, 3);
+    x ^= xRot1 ^ xRot3 ^ (x >> 1);
 
     // 3. Diffusione non-lineare globale
-    x ^= (x >> 3) * PRNG_MULT1 + ((x << 3) >> 3) * PRNG_MULT2;
+    const m_block xShift = (x << 3) >> 3;
+    x ^= (x >> 3) * PRNG_MULT1 + xShift * PRNG_MULT2;
 
     // 8. Aggiornamento dello stato
-    *state = (x + 1) ^ mBlock::rotl(x + x, x);
+    *state = (x + 1) ^ mBlock::rotl(x << 1, x);
 
     return x;
 }
@@ -62,6 +65,7 @@ void global_diffuse(MBLOCK *data, const m_block seed) {
 
     const size_t len = data->getLen();
     if (len < 2) return;
+    m_block *buf = data->getDataRef();
 
     const m_block k0 = seed;
     const m_block k1 = seed ^ DIFFUSE_CONST;
@@ -70,24 +74,24 @@ void global_diffuse(MBLOCK *data, const m_block seed) {
     // Pass 1: forward
     m_block prev = k0;
     for (size_t i = 0; i < len; ++i) {
-        const m_block cur = data->getBlock(i);
-        (void) data->setBlock(i, cur ^ mix(prev));
+        const m_block cur = buf[i];
+        buf[i] = cur ^ mix(prev);
         prev = cur;
     }
 
     // Pass 2: backward
     m_block next = k1;
     for (size_t i = len; i-- > 0;) {
-        const m_block cur = data->getBlock(i);
-        (void) data->setBlock(i, cur ^ mix(next));
+        const m_block cur = buf[i];
+        buf[i] = cur ^ mix(next);
         next = cur;
     }
 
     // Pass 3: forward
     prev = k2;
     for (size_t i = 0; i < len; ++i) {
-        const m_block cur = data->getBlock(i);
-        (void) data->setBlock(i, cur ^ mix(prev));
+        const m_block cur = buf[i];
+        buf[i] = cur ^ mix(prev);
         prev = cur;
     }
 }
@@ -100,6 +104,7 @@ void global_diffuse_inv(MBLOCK *data, m_block seed) {
 
     const size_t len = data->getLen();
     if (len < 2) return;
+    m_block *buf = data->getDataRef();
 
     const m_block k0 = seed;
     const m_block k1 = seed ^ DIFFUSE_CONST;
@@ -108,24 +113,24 @@ void global_diffuse_inv(MBLOCK *data, m_block seed) {
     // Undo pass 3
     m_block prev = k2;
     for (size_t i = 0; i < len; ++i) {
-        const m_block cur = data->getBlock(i) ^ mix(prev);
-        (void) data->setBlock(i, cur);
+        const m_block cur = buf[i] ^ mix(prev);
+        buf[i] = cur;
         prev = cur;
     }
 
     // Undo pass 2
     m_block next = k1;
     for (size_t i = len; i-- > 0;) {
-        const m_block cur = data->getBlock(i) ^ mix(next);
-        (void) data->setBlock(i, cur);
+        const m_block cur = buf[i] ^ mix(next);
+        buf[i] = cur;
         next = cur;
     }
 
     // Undo pass 1
     prev = k0;
     for (size_t i = 0; i < len; ++i) {
-        const m_block cur = data->getBlock(i) ^ mix(prev);
-        (void) data->setBlock(i, cur);
+        const m_block cur = buf[i] ^ mix(prev);
+        buf[i] = cur;
         prev = cur;
     }
 }
@@ -142,23 +147,24 @@ void correlate_data(MBLOCK *data, m_block seed) {
 
     const size_t dataLen = data->getLen();
     if (dataLen == 0) return;
+    m_block *buf = data->getDataRef();
 
     // Apply xTime transformation to seed once
     xTimeMBlock(&seed);
 
     // Process blocks in forward order
     for (size_t i = 0; i < dataLen; i++) {
-        const m_block currentBlock = data->getBlock(i);
-        const size_t nextIdx = (i + 1) % dataLen;
-        const m_block nextBlock = data->getBlock(nextIdx);
+        const m_block currentBlock = buf[i];
+        const size_t nextIdx = (i + 1 < dataLen) ? (i + 1) : 0;
+        const m_block nextBlock = buf[nextIdx];
 
         // Apply transformations: rotate, XOR with seed, then Hadamard
         m_block k = mBlock::rotl(currentBlock ^ seed, 3);
         k = pseudoHadamardT(k);
 
         // Update blocks (order matters!)
-        (void) data->setBlock(nextIdx, k); // Update next block first
-        (void) data->setBlock(i, k ^ nextBlock); // Then update current block
+        buf[nextIdx] = k; // Update next block first
+        buf[i] = k ^ nextBlock; // Then update current block
     }
 }
 
@@ -167,6 +173,7 @@ void uncorrelate_data(MBLOCK *data, m_block seed) {
 
     const size_t dataLen = data->getLen();
     if (dataLen == 0) return;
+    m_block *buf = data->getDataRef();
 
     // Apply xTime transformation to seed once (must match correlate_data)
     xTimeMBlock(&seed);
@@ -174,17 +181,17 @@ void uncorrelate_data(MBLOCK *data, m_block seed) {
     // Process blocks in reverse order to undo correlation
     for (size_t i = dataLen; i > 0; i--) {
         size_t j = i - 1;
-        const size_t nextIdx = (j + 1) % dataLen;
+        const size_t nextIdx = (j + 1 < dataLen) ? (j + 1) : 0;
 
-        const m_block currentBlock = data->getBlock(j);
-        const m_block nextBlock = data->getBlock(nextIdx);
+        const m_block currentBlock = buf[j];
+        const m_block nextBlock = buf[nextIdx];
 
         // Inverse transformations in reverse order
         m_block k = pseudoHadamardTInv(nextBlock);
         k = mBlock::rotr(k, 3) ^ seed;
 
         // Update blocks in reverse order
-        (void) data->setBlock(j, k);
-        (void) data->setBlock(nextIdx, nextBlock ^ currentBlock);
+        buf[j] = k;
+        buf[nextIdx] = nextBlock ^ currentBlock;
     }
 }

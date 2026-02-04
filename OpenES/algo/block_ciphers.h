@@ -79,7 +79,7 @@ MBLOCK* oes_enc_cke(const MBLOCK* plain, const MBLOCK* key, m_block seed = stati
 MBLOCK* oes_dec_cke(const MBLOCK* cipher, const MBLOCK* key, m_block seed = static_cast<m_block>(0x3C46C64A));
 
 /**
- * ADV (Advanced) encryption with PBKDF-based round keys
+ * ADV (Advanced) encryption with session-derived round keys
  * @param plain Plaintext MBLOCK to encrypt
  * @param key Encryption key MBLOCK
  * @param session Pointer to session counter. Updated after encryption for stream mode.
@@ -88,7 +88,7 @@ MBLOCK* oes_dec_cke(const MBLOCK* cipher, const MBLOCK* key, m_block seed = stat
 MBLOCK* oes_enc_adv(const MBLOCK* plain, const MBLOCK* key, size_t* session = nullptr);
 
 /**
- * ADV (Advanced) decryption with PBKDF-based round keys
+ * ADV (Advanced) decryption with session-derived round keys
  * @param cipher Ciphertext MBLOCK to decrypt
  * @param key Decryption key MBLOCK
  * @param session Pointer to session counter. Updated after decryption for stream mode.

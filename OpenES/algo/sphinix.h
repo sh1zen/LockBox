@@ -1,5 +1,7 @@
 #pragma once
 
+#include <memory>
+
 #include <OpenES/layer/raw-layer.h>
 
 // ============================================================================
@@ -34,6 +36,12 @@
 // ============================================================================
 
 namespace SPHINX {
+    class Context;
+    struct ContextDeleter {
+        void operator()(Context *ctx) const;
+    };
+    using ContextPtr = std::unique_ptr<Context, ContextDeleter>;
+
     /**
      * Encrypts data using SPHINX cipher
      *
@@ -76,4 +84,10 @@ namespace SPHINX {
      *   }
      */
     MBLOCK *decrypt(const MBLOCK *ciphertext, const MBLOCK *key);
+
+    ContextPtr create_context(const MBLOCK *key, size_t len);
+
+    MBLOCK *encrypt_with_context(const MBLOCK *plaintext, const Context &ctx);
+
+    MBLOCK *decrypt_with_context(const MBLOCK *ciphertext, const Context &ctx);
 } // namespace SPHINX

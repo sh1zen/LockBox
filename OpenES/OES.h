@@ -51,6 +51,10 @@ public:
 
     [[nodiscard]] std::pair<void *, size_t> get_cipher_data() const;
 
+    /// Returns raw cipher bytes without cloning the internal block.
+    /// Use for encrypted output where all blocks must be preserved (no padding strip).
+    [[nodiscard]] std::pair<void *, size_t> get_cipher_data_raw() const;
+
     void resetBlocks();
 
     void resetStreamState();

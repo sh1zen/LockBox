@@ -1,0 +1,94 @@
+# .github/workflows/release.yml
+
+name: Create Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          draft: true
+          prerelease: true
+          generate_release_notes: true
+
+  build-and-upload:
+    name: Build and Upload Binaries
+    needs: create-release
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            asset_name: "LockBox-windows-x64.zip"
+            binary_name: "LockBox.exe"
+            build_type: "Release"
+          - os: ubuntu-latest
+            asset_name: "LockBox-linux-x64.tar.gz"
+            binary_name: "LockBox"
+            build_type: "Release"
+          - os: macos-latest
+            asset_name: "LockBox-macos-x64.tar.gz"
+            binary_name: "LockBox"
+            build_type: "Release"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: cmake -B build -D BUILD_TESTS=OFF -D CMAKE_BUILD_TYPE=${{ matrix.build_type }}
+
+      - name: Build
+        run: cmake --build build --config ${{ matrix.build_type }}
+
+      - name: Prepare package
+        shell: bash
+        run: |
+          set -e
+          STAGING_DIR="staging"
+          mkdir "$STAGING_DIR"
+
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            BINARY_PATH="build/Release/${{ matrix.binary_name }}"
+          else
+            BINARY_PATH="build/${{ matrix.binary_name }}"
+          fi
+
+          cp "$BINARY_PATH" "$STAGING_DIR/"
+          cp README.md "$STAGING_DIR/"
+          cp LICENSE "$STAGING_DIR/" || echo "LICENSE not found"
+
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            7z a "${{ matrix.asset_name }}" "./$STAGING_DIR/*"
+          else
+            tar -czf "${{ matrix.asset_name }}" -C "$STAGING_DIR" .
+          fi
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset_name }}
+          tag_name: ${{ github.ref_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

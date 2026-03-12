@@ -1,8 +1,9 @@
 #include "iNode.h"
-
 #include <iostream>
 #include <fstream>
 #include <chrono>
+#include <algorithm>
+#include <tuple>
 
 #include "interface.h"
 #include "filesystem.h"
@@ -682,9 +683,9 @@ bool iNode::removeDirectoryRecursive(const std::string &plainPath) {
             toDelete.emplace_back(p, b->isFile);
     });
 
-    std::sort(toDelete.begin(), toDelete.end(), [](const auto &a, const auto &b) {
-        size_t da = std::count(a.first.begin(), a.first.end(), '/');
-        size_t db = std::count(b.first.begin(), b.first.end(), '/');
+    std::sort(toDelete.begin(), toDelete.end(), [](const auto &a, const auto &b) -> bool {
+        const size_t da = std::count(a.first.begin(), a.first.end(), '/');
+        const size_t db = std::count(b.first.begin(), b.first.end(), '/');
         if (da != db) return da > db;
         return a.second && !b.second;
     });

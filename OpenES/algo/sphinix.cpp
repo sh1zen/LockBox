@@ -3,6 +3,7 @@
 #include <memory>
 #include <algorithm>
 #include <cstring>
+#include <bit>
 
 #include "core.h"
 #include "key_management.h"
@@ -95,6 +96,22 @@ namespace SPHINX {
         m_block x = a;
         for (int i = 0; i < 6; ++i) x *= (2 - a * x);
         return x;
+    }
+
+    /**
+     * Compute bit width (log2 equivalent) for round calculation
+     * Alternative to std::bit_width which may be missing on some macOS systems
+     * @param x Value to calculate width for
+     * @return Number of bits required to represent x
+     */
+    constexpr int bit_width_fallback(unsigned int x) {
+        if (x == 0) return 0;
+        int width = 0;
+        while (x > 0) {
+            x >>= 1;
+            width++;
+        }
+        return width;
     }
 
     // ============================================================================
@@ -232,7 +249,13 @@ namespace SPHINX {
      */
     constexpr size_t NUM_ROUNDS = []() constexpr -> size_t {
         // Round base = log2(total bits)
-        size_t rounds = std::bit_width(static_cast<unsigned int>(OES_MEM_SIZE * OES_NUM_OF_BLOCKS));
+        const auto total_bits = static_cast<unsigned int>(OES_MEM_SIZE * OES_NUM_OF_BLOCKS);
+        size_t rounds;
+#ifdef __cpp_lib_bitops
+        rounds = static_cast<size_t>(std::bit_width(total_bits));
+#else
+        rounds = static_cast<size_t>(bit_width_fallback(total_bits));
+#endif
 
         // Aggiungi qualche round extra se abbiamo tanti blocchi (cross-block mixing)
         if constexpr (OES_NUM_OF_BLOCKS >= 8) rounds += 2;

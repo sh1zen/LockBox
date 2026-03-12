@@ -36,22 +36,22 @@ namespace prng {
         if constexpr (OES_MEM_SIZE == 8) {
             return static_cast<m_block>(SBOX256[static_cast<uint8_t>(x)]);
         } else if constexpr (OES_MEM_SIZE == 16) {
-            return static_cast<m_block>(SBOX256[x & 0xFF])
-                   | (static_cast<m_block>(SBOX256[(x >> 8) & 0xFF]) << 8);
+            return static_cast<m_block>(SBOX256[static_cast<uint8_t>(x & 0xFF)])
+                   | (static_cast<m_block>(SBOX256[static_cast<uint8_t>((x >> 8) & 0xFF)]) << 8);
         } else if constexpr (OES_MEM_SIZE == 32) {
-            return static_cast<m_block>(SBOX256[x & 0xFF])
-                   | (static_cast<m_block>(SBOX256[(x >> 8) & 0xFF]) << 8)
-                   | (static_cast<m_block>(SBOX256[(x >> 16) & 0xFF]) << 16)
-                   | (static_cast<m_block>(SBOX256[(x >> 24) & 0xFF]) << 24);
+            return static_cast<m_block>(SBOX256[static_cast<uint8_t>(x & 0xFF)])
+                   | (static_cast<m_block>(SBOX256[static_cast<uint8_t>((x >> 8) & 0xFF)]) << 8)
+                   | (static_cast<m_block>(SBOX256[static_cast<uint8_t>((x >> 16) & 0xFF)]) << 16)
+                   | (static_cast<m_block>(SBOX256[static_cast<uint8_t>((x >> 24) & 0xFF)]) << 24);
         } else if constexpr (OES_MEM_SIZE == 64) {
-            return static_cast<m_block>(SBOX256[x & 0xFF])
-                   | (static_cast<m_block>(SBOX256[(x >> 8) & 0xFF]) << 8)
-                   | (static_cast<m_block>(SBOX256[(x >> 16) & 0xFF]) << 16)
-                   | (static_cast<m_block>(SBOX256[(x >> 24) & 0xFF]) << 24)
-                   | (static_cast<m_block>(SBOX256[(x >> 32) & 0xFF]) << 32)
-                   | (static_cast<m_block>(SBOX256[(x >> 40) & 0xFF]) << 40)
-                   | (static_cast<m_block>(SBOX256[(x >> 48) & 0xFF]) << 48)
-                   | (static_cast<m_block>(SBOX256[(x >> 56) & 0xFF]) << 56);
+            return static_cast<m_block>(SBOX256[static_cast<uint8_t>(x & 0xFF)])
+                   | (static_cast<m_block>(SBOX256[static_cast<uint8_t>((x >> 8) & 0xFF)]) << 8)
+                   | (static_cast<m_block>(SBOX256[static_cast<uint8_t>((x >> 16) & 0xFF)]) << 16)
+                   | (static_cast<m_block>(SBOX256[static_cast<uint8_t>((x >> 24) & 0xFF)]) << 24)
+                   | (static_cast<m_block>(SBOX256[static_cast<uint8_t>((x >> 32) & 0xFF)]) << 32)
+                   | (static_cast<m_block>(SBOX256[static_cast<uint8_t>((x >> 40) & 0xFF)]) << 40)
+                   | (static_cast<m_block>(SBOX256[static_cast<uint8_t>((x >> 48) & 0xFF)]) << 48)
+                   | (static_cast<m_block>(SBOX256[static_cast<uint8_t>((x >> 56) & 0xFF)]) << 56);
         } else if constexpr (OES_MEM_SIZE == 128) {
             m_block result = 0;
             result |= static_cast<m_block>(SBOX256[static_cast<uint8_t>(x)]);
@@ -175,16 +175,16 @@ namespace prng {
             const size_t b1 = (static_cast<size_t>(r) + 2) & 15;
 
             L ^= mBlock::rotl(st[b0], ROT1);
-            R ^= mBlock::rotl(st[b1], ctr);
+            R ^= mBlock::rotl(st[b1], static_cast<size_t>(ctr));
 
             L ^= mBlock::rotl(st[(b0 + 1) & 15], ROT1 + 1);
-            R ^= mBlock::rotl(st[(b1 + 1) & 15], ctr + 1);
+            R ^= mBlock::rotl(st[(b1 + 1) & 15], static_cast<size_t>(ctr + 1));
 
             L ^= mBlock::rotl(st[(b0 + 2) & 15], ROT1 + 2);
-            R ^= mBlock::rotl(st[(b1 + 2) & 15], ctr + 2);
+            R ^= mBlock::rotl(st[(b1 + 2) & 15], static_cast<size_t>(ctr + 2));
 
             L ^= mBlock::rotl(st[(b0 + 3) & 15], ROT1 + 3);
-            R ^= mBlock::rotl(st[(b1 + 3) & 15], ctr + 3);
+            R ^= mBlock::rotl(st[(b1 + 3) & 15], static_cast<size_t>(ctr + 3));
 
             // Mixing moltiplicativo
             L *= PRNG_MULT1;
@@ -222,8 +222,8 @@ namespace prng {
         accumulator ^= accumulator >> S1;
 
         // State update meno frequente
-        if ((ctr & 3) == 0) {
-            st[(ctr >> 2) & 15] ^= accumulator;
+        if ((static_cast<uint64_t>(ctr) & 3) == 0) {
+            st[static_cast<size_t>((ctr >> 2) & 15)] ^= accumulator;
         }
 
         return result;

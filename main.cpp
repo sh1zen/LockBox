@@ -2,10 +2,14 @@
 #include <iostream>
 #include <deque>
 #include <utility>
-
+#include <sstream>
+#include <algorithm>
 #include "utils.h"
 
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #include <conio.h>
 #else
@@ -179,7 +183,7 @@ std::string getInput(const std::string &prompt) {
 
 void pressEnterToContinue() {
     std::cout << "\nPress ENTER to continue...";
-    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+    std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
 }
 
 std::string formatSize(size_t bytes) {
@@ -367,7 +371,7 @@ class LineEditor {
         const auto ls = partial.rfind('/');
         const auto bs = partial.rfind('\\');
         const auto sep = (ls != std::string::npos && bs != std::string::npos)
-                             ? std::max(ls, bs)
+                             ? (std::max)(ls, bs)
                              : (ls != std::string::npos ? ls : bs);
         if (sep == std::string::npos) {
             dir = ".";
@@ -830,7 +834,7 @@ void encryptText() {
     if (!iv.empty()) {
         auto *b = MBLOCK::fromBytes(iv.c_str(), iv.length());
         if (b) {
-            oes->setIV(b->getData(), b->getLen());
+            oes->setIV(b->getDataRef(), b->getLen());
             delete b;
         }
     }
@@ -879,7 +883,7 @@ void decryptText() {
     if (!iv.empty()) {
         auto *b = MBLOCK::fromBytes(iv.c_str(), iv.length());
         if (b) {
-            oes->setIV(b->getData(), b->getLen());
+            oes->setIV(b->getDataRef(), b->getLen());
             delete b;
         }
     }

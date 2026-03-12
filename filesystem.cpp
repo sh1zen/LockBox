@@ -3,19 +3,91 @@
 #include <fstream>
 #include <algorithm>
 #include <sys/stat.h>
-#include <dirent.h>
 
 #ifdef _WIN32
     #include <io.h>
     #include <direct.h>
+    #include <windows.h>
     #define PATH_MAX 260
     #define getcwd _getcwd
     #define mkdir(path, mode) _mkdir(path)
+    #define rmdir _rmdir
     #define access _access
     #define F_OK 0
+
+    #ifndef S_ISREG
+        #define S_ISREG(m) (((m) & S_IFMT) == S_IFREG)
+    #endif
+    #ifndef S_ISDIR
+        #define S_ISDIR(m) (((m) & S_IFMT) == S_IFDIR)
+    #endif
 #else
+    #include <dirent.h>
     #include <unistd.h>
     #include <climits>
+#endif
+
+// ====================== Win32 Dirent Implementation ======================
+
+#ifdef _WIN32
+struct dirent {
+    char d_name[MAX_PATH];
+};
+
+struct DIR {
+    HANDLE hFind;
+    WIN32_FIND_DATAW findData;
+    struct dirent entry;
+    bool first;
+    bool done;
+};
+
+static DIR *opendir(const char *path) {
+    std::string searchPath = path;
+    if (searchPath.empty()) searchPath = ".";
+    if (searchPath.back() == '/' || searchPath.back() == '\\')
+        searchPath += "*";
+    else
+        searchPath += "/*";
+
+    int size_needed = MultiByteToWideChar(CP_UTF8, 0, searchPath.c_str(), -1, nullptr, 0);
+    std::wstring wSearchPath(size_needed, 0);
+    MultiByteToWideChar(CP_UTF8, 0, searchPath.c_str(), -1, &wSearchPath[0], size_needed);
+
+    DIR *dir = new DIR;
+    dir->hFind = FindFirstFileW(wSearchPath.c_str(), &dir->findData);
+    if (dir->hFind == INVALID_HANDLE_VALUE) {
+        delete dir;
+        return nullptr;
+    }
+    dir->first = true;
+    dir->done = false;
+    return dir;
+}
+
+static struct dirent *readdir(DIR *dir) {
+    if (dir->done) return nullptr;
+
+    if (!dir->first) {
+        if (!FindNextFileW(dir->hFind, &dir->findData)) {
+            dir->done = true;
+            return nullptr;
+        }
+    } else {
+        dir->first = false;
+    }
+
+    WideCharToMultiByte(CP_UTF8, 0, dir->findData.cFileName, -1, dir->entry.d_name, MAX_PATH, nullptr, nullptr);
+    return &dir->entry;
+}
+
+static int closedir(DIR *dir) {
+    if (dir) {
+        FindClose(dir->hFind);
+        delete dir;
+    }
+    return 0;
+}
 #endif
 
 // ====================== File I/O ======================

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <exception>
 
 class OESException : virtual public std::exception {
 protected:
@@ -13,7 +14,7 @@ public:
     /** Destructor.
      *  Virtual to allow for subclassing.
      */
-    ~OESException() override;
+    ~OESException() noexcept override;
 
     /** Returns a pointer to the (constant) error description.
      *  @return A pointer to a const char*. The underlying memory

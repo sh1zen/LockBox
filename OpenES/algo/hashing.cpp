@@ -214,9 +214,9 @@ void OESHasher::absorbData(const MBLOCK *data, size_t dataLen, m_block pad) {
     const size_t fullLen = dataLen & ~static_cast<size_t>(3);
 
     auto absorbQuad = [&](const size_t i, m_block d0, m_block d1, m_block d2, m_block d3) {
-        d0 = mBlock::rotr(d0, d1 & ROT_MASK);
-        d1 = mBlock::rotr(d1, d2 & ROT_MASK);
-        d2 = mBlock::rotr(d2, d3 & ROT_MASK);
+        d0 = mBlock::rotr(d0, static_cast<size_t>(d1 & ROT_MASK));
+        d1 = mBlock::rotr(d1, static_cast<size_t>(d2 & ROT_MASK));
+        d2 = mBlock::rotr(d2, static_cast<size_t>(d3 & ROT_MASK));
         d3 = mBlock::rotr(d3, static_cast<uint32_t>((i * 7 + 13) & ROT_MASK));
 
         const m_block route = static_cast<m_block>(i) ^ m_state[(i + 7) & STATE_MASK] ^

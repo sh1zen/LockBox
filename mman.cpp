@@ -173,9 +173,7 @@ int munlock(const void *addr, size_t len) {
 #else // Unix/Linux/macOS
 
 // ====================== Unix Implementation ======================
-// Le funzioni sono già fornite da <sys/mman.h>, niente da implementare
-
-#include <sys/mman.h>
+// Le funzioni sono già fornite da <sys/mman.h>, che è incluso in mman.h
 
 #endif // _WIN32
 

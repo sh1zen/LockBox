@@ -21,7 +21,7 @@ m_block prng_next(m_block *state) {
     x ^= (x >> 3) * PRNG_MULT1 + xShift * PRNG_MULT2;
 
     // 8. Aggiornamento dello stato
-    *state = (x + 1) ^ mBlock::rotl(x << 1, x);
+    *state = (x + 1) ^ mBlock::rotl(x << 1, static_cast<size_t>(x));
 
     return x;
 }

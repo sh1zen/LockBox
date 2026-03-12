@@ -1,0 +1,35 @@
+# This is the name of the workflow that will be displayed on GitHub
+name: C++ CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    name: Build & Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Configure CMake
+      run: cmake -B build -D BUILD_TESTS=ON
+
+    - name: Build
+      run: cmake --build build --config Release
+
+    - name: Run Tests
+      working-directory: build
+      run: |
+        if [[ "${{ runner.os }}" == "Windows" ]]; then
+          ./Release/LockBoxTests.exe
+        else
+          ./LockBoxTests
+        fi
+      shell: bash

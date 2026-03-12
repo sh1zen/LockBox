@@ -2,6 +2,12 @@
 #define MMAN_H
 
 #include <cstdint>
+#include <cstddef>
+
+#ifndef _WIN32
+#include <sys/types.h>
+#include <sys/mman.h>
+#endif
 
 // ====================== POSIX-compatible constants ======================
 
@@ -41,6 +47,7 @@ using mman_offset_t = off_t;
 
 // ====================== C Interface ======================
 
+#ifdef _WIN32
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -59,6 +66,7 @@ int munlock(const void *addr, size_t len);
 
 #ifdef __cplusplus
 }
+#endif
 #endif
 
 // ====================== C++ Interface ======================

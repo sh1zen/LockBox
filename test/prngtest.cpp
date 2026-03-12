@@ -9,6 +9,7 @@
 #include <iostream>
 #include <cmath>
 #include <numeric>
+#include <algorithm>
 #include <functional>
 #include <map>
 

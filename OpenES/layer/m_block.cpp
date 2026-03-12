@@ -1,5 +1,6 @@
 #include "m_block.h"
-
+#include <algorithm>
+#include <cstring>
 #include <OpenES/support/oes-exception.h>
 #include "raw-layer.h"
 #include "support.h"
@@ -225,7 +226,7 @@ void MBLOCK::secure_zero() const {
 }
 
 // ========== CONVERSION METHODS ==========
-__attribute__((noinline))
+OES_NOINLINE
 MBLOCK *MBLOCK::fromBytes(const void *src, const size_t nByte) {
     if (!src || nByte == 0) return nullptr;
 
@@ -252,7 +253,7 @@ MBLOCK *MBLOCK::fromBytes(const void *src, const size_t nByte) {
     return new MBLOCK(out, blocks, true);
 }
 
-__attribute__((noinline))
+OES_NOINLINE
 MBLOCK *MBLOCK::fromBytes_raw(const void *src, const size_t nByte) {
     if (!src || nByte == 0) return nullptr;
 
@@ -332,7 +333,7 @@ MBLOCK *MBLOCK::fromBytes_raw(const void *src, const size_t nByte) {
     return result;
 }
 
-__attribute__((noinline))
+OES_NOINLINE
 std::pair<uint8_t *, size_t> MBLOCK::toBytes_raw(const size_t extraSize) const {
     if (!data || len == 0) return {nullptr, 0};
 
@@ -402,7 +403,7 @@ std::pair<uint8_t *, size_t> MBLOCK::toBytes_raw(const size_t extraSize) const {
     return {converted, outLen};
 }
 
-__attribute__((noinline))
+OES_NOINLINE
 std::pair<uint8_t *, size_t> MBLOCK::toBytes() const {
     if (!data || len == 0) return {nullptr, 0};
 

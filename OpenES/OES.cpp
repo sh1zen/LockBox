@@ -283,7 +283,7 @@ OES *OES::enc_ctr() {
         this->ctrCounter = 0;
     }
 
-    MBLOCK *result = oes_enc_ctr(this->plainBlock, this->wKey, m_block(0xa54ff53a), &this->ctrCounter);
+    MBLOCK *result = oes_enc_ctr(this->plainBlock, this->wKey, static_cast<m_block>(0xa54ff53a), &this->ctrCounter);
     if (!result) {
         return this;
     }
@@ -306,7 +306,7 @@ OES *OES::dec_ctr() {
         this->ctrCounter = 0;
     }
 
-    MBLOCK *result = oes_dec_ctr(this->cipherBlock, this->wKey, m_block(0xa54ff53a), &this->ctrCounter);
+    MBLOCK *result = oes_dec_ctr(this->cipherBlock, this->wKey, static_cast<m_block>(0xa54ff53a), &this->ctrCounter);
     if (!result) {
         return this;
     }
@@ -442,7 +442,7 @@ OES *OES::dump(const bool printable) {
         this->wKey->dump(false);
     }
     if (this->plainBlock && !this->plainBlock->isNull()) {
-        printf("PlainBlock [%llu]::", this->plainBlock->getBytesLen());
+        printf("PlainBlock [%zu]::", this->plainBlock->getBytesLen());
         this->plainBlock->dump(printable);
     }
     if (this->cipherBlock && !this->cipherBlock->isNull()) {

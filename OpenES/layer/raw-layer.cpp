@@ -15,7 +15,7 @@ namespace mBlock {
         if (pos >= OES_BYTES_X_BLOCK) {
             return 0;
         }
-        return (block >> (pos * 8)) & 0xFF;
+        return static_cast<uint8_t>((block >> (pos * 8)) & 0xFF);
     }
 
     /**
@@ -32,7 +32,7 @@ namespace mBlock {
         auto *bytes = new uint8_t[OES_BYTES_X_BLOCK];
 
         for (size_t j = 0; j < OES_BYTES_X_BLOCK; j++) {
-            bytes[j] = (block >> (8 * (OES_BYTES_X_BLOCK - 1 - j))) & 0xFF;
+            bytes[j] = static_cast<uint8_t>((block >> (8 * (OES_BYTES_X_BLOCK - 1 - j))) & 0xFF);
         }
 
         return std::make_pair(bytes, OES_BYTES_X_BLOCK);
@@ -56,7 +56,7 @@ namespace mBlock {
 
         // Verify padding bytes
         for (size_t i = 1; i < padding && i < OES_BYTES_X_BLOCK; i++) {
-            if (bytes[OES_BYTES_X_BLOCK - 1 - i] != pad) {
+            if (static_cast<m_block>(bytes[OES_BYTES_X_BLOCK - 1 - i]) != pad) {
                 throw OESException("OES exception:: invalid padding", OES_EXCEPTION_INV_PAD);
             }
         }

@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstdint>
+#include <cstddef>
+
 #ifndef OES_NUM_OF_BLOCKS
 #define OES_NUM_OF_BLOCKS 16
 #endif
@@ -48,17 +51,6 @@
 
 #define OES_BYTES_X_BLOCK (OES_MEM_SIZE / 8)
 
-typedef signed char int8_t;
-typedef unsigned char uint8_t;
-typedef short int16_t;
-typedef unsigned short uint16_t;
-typedef signed int int32_t;
-typedef unsigned int uint32_t;
-typedef signed long long int64_t;
-typedef unsigned long long uint64_t;
-
-typedef uint64_t size_t;
-
 
 #define OES_TYPE_RAW_UINT8 0
 #define OES_TYPE_MBLOCK 1
@@ -73,12 +65,25 @@ typedef uint64_t size_t;
 #define MAX(X, Y) (((X) > (Y)) ? (X) : (Y))
 
 
+#ifdef _MSC_VER
+#include <intrin.h>
+#include "uint128_msvc.h"
+#define OES_NOINLINE __declspec(noinline)
+#pragma warning(disable: 4068) // unknown pragma
+#else
+#define OES_NOINLINE __attribute__((noinline))
+#endif
+
 template<unsigned Bits>
 consteval auto mask_to_block_size(uint64_t high, const uint64_t low) {
     static_assert(Bits > 0 && Bits <= 128, "Invalid bit size");
 
     if constexpr (Bits == 128) {
+#ifdef _MSC_VER
+        return __uint128_t{low, high};
+#else
         return (static_cast<__uint128_t>(high) << 64) | static_cast<__uint128_t>(low);
+#endif
     } else if constexpr (Bits == 64) {
         return high;
     } else if constexpr (Bits == 32) {

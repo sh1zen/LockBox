@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 
 #ifdef _WIN32
+#include <io.h>
 #include "mman.h"
 
 static int p_open(const char *p, int f, int m = 0) {

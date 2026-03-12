@@ -18,7 +18,11 @@
 #elif OES_LOGIC_BLOCK_SIZE <= 64
     __extension__ typedef uint64_t m_block;
 #elif OES_LOGIC_BLOCK_SIZE <= 128
-__extension__ typedef __uint128_t m_block;
+#ifdef _MSC_VER
+    typedef __uint128_t_msvc m_block;
+#else
+    __extension__ typedef __uint128_t m_block;
+#endif
 #endif
 
 // ============================================================================

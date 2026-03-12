@@ -31,6 +31,8 @@ set(COMMON_SOURCES
         iNode/Block.cpp
         iNode/iNode.cpp
         iNode/inode_raw.cpp
+        OpenES/layer/uint128_msvc.h
+        OpenES/layer/defines.h
         OpenES/layer/m_block.h
         OpenES/layer/m_block.cpp
         OpenES/algo/constants.h
@@ -43,11 +45,11 @@ set(COMMON_SOURCES
         OpenES/algo/sphinix.cpp
         OpenES/algo/sphinix.h
         iNode/inode_raw.h
+        OpenES/layer/uint128_msvc.h
 )
 
 set(APP_SOURCES
         main.cpp
-        OpenES/layer/defines.h
 )
 
 set(TEST_SOURCES
